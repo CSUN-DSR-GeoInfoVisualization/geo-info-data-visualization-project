@@ -10,7 +10,9 @@ import os
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO_ROOT, "backend"))
 
-from ml.retrain_and_gate import decide  # noqa: E402
+from ml.retrain_and_gate import (  # noqa: E402
+    decide, holdout_sufficient, MIN_HOLDOUT_ROWS, MIN_HOLDOUT_PER_CLASS,
+)
 
 GOOD = {"auroc": 0.90, "brier": 0.12}
 GREAT = {"auroc": 0.97, "brier": 0.05}
@@ -47,6 +49,29 @@ def test_within_tolerance_promotes():
     # tiny regression within AUROC_TOL/BRIER_TOL is allowed
     promote, _ = decide({"auroc": 0.957, "brier": 0.053}, True, [], {"auroc": 0.96, "brier": 0.05}, True)
     assert promote is True
+
+
+# --- temporal-holdout sufficiency -------------------------------------------
+# The gate compares both models on rows newer than the production model's
+# trained_at. When too few such rows exist the run must HOLD, not reject: six
+# consecutive silent rejections are what left the model stale for eight weeks.
+
+def test_holdout_sufficient_when_both_classes_well_represented():
+    assert holdout_sufficient(MIN_HOLDOUT_ROWS, MIN_HOLDOUT_PER_CLASS,
+                              MIN_HOLDOUT_ROWS - MIN_HOLDOUT_PER_CLASS) is True
+
+
+def test_holdout_insufficient_when_too_few_rows():
+    assert holdout_sufficient(MIN_HOLDOUT_ROWS - 1, 60, 60) is False
+
+
+def test_holdout_insufficient_when_one_class_is_starved():
+    # The real July 2026 case: plenty of fire rows, almost no no-fire rows.
+    assert holdout_sufficient(400, 379, MIN_HOLDOUT_PER_CLASS - 1) is False
+
+
+def test_holdout_insufficient_when_single_class():
+    assert holdout_sufficient(500, 500, 0) is False
 
 
 if __name__ == "__main__":

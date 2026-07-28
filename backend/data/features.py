@@ -56,8 +56,10 @@ def get_feature(lat: float, lon: float, key: str) -> float:
             return float(get_evi_live(lat, lon))
 
         if key in ("wind", "humidity", "air_temp_encoded"):
-            from data.live_weather import get_weather
-            w = get_weather(lat, lon)
+            # Daily aggregates, not instantaneous — these three feed the model and
+            # must match the definition it was trained on (see get_weather_daily).
+            from data.live_weather import get_weather_daily
+            w = get_weather_daily(lat, lon)
             if key == "wind":
                 return float(w["wind_speed"])
             if key == "humidity":

@@ -12,6 +12,7 @@ repo by the calling workflow (CSV append + commit). That keeps the growing
 training set in free storage with zero database cost-risk.
 """
 import os
+import re
 import json
 import time
 import random
@@ -22,9 +23,9 @@ import requests
 from flask import Blueprint, request, jsonify
 
 from data.features import get_feature
-from data.live_weather import get_weather
+from data.live_weather import get_weather_daily
 from data.weather_crosscheck import get_weather_second
-from ml.geo_checks import on_ca_land, in_any_perimeter
+from ml.geo_checks import on_ca_land, in_any_perimeter, _county_features
 
 logger = logging.getLogger(__name__)
 ml_ingest_bp = Blueprint("ml_ingest", __name__)
@@ -92,16 +93,20 @@ def _row_quality_issue(row):
 
 
 def _features_for(lat, lon):
-    wx = get_weather(lat, lon) or {}
+    """Today's features for a point, using the DAILY-AGGREGATE weather definition
+    the model is trained on (see data.live_weather.get_weather_daily).
+
+    Weather is fetched once and every field is read from that one response. An
+    ingest row must be all-or-nothing: mixing a live reading for one feature with
+    a defaulted or IDW-estimated value for another produces a row that looks clean
+    to the range gate but isn't a real observation. If the fetch fails the caller
+    drops the point rather than inventing a row."""
+    wx = get_weather_daily(lat, lon)
     return {
         "evi": float(get_feature(lat, lon, "evi")),
-        "air_temp_encoded": float(wx.get("air_temp_encoded", get_feature(lat, lon, "air_temp_encoded"))),
-        # get_weather returns the key "wind_speed" (not "wind"). The old default
-        # of 0.0 silently recorded wind=0 on every row, making the wind feature
-        # dead. Read the correct key; fall back to the IDW estimate only if the
-        # live fetch had no wind at all.
-        "wind": float(wx["wind_speed"]) if "wind_speed" in wx else float(get_feature(lat, lon, "wind")),
-        "humidity": float(wx.get("humidity", 50.0)),
+        "air_temp_encoded": (float(wx["temperature_celsius"]) + 273.15) / 0.02,
+        "wind": float(wx["wind_speed"]),
+        "humidity": float(wx["humidity"]),
         "elevation": float(get_feature(lat, lon, "elevation")),
         "kbdi": float(get_feature(lat, lon, "kbdi")),
     }
@@ -291,10 +296,25 @@ def ingest():
         logger.warning("FIRMS fetch failed: %s", e)
         return jsonify({"error": f"FIRMS fetch failed: {e}"}), 502
 
-    rng = random.Random(20260603)
-    fire_pts = fires[:MAX_FIRE_PER_RUN]
     lon0, lat0, lon1, lat1 = CA_BBOX
     acq = fires[0][2] if fires else request.args.get("date", "")
+
+    # Per-run seed. This was random.Random(20260603) — a CONSTANT, reconstructed
+    # on every run, so every ingest walked the identical candidate sequence and
+    # the no-fire class collapsed to 17 distinct coordinates across 159 rows.
+    # Seeding from the run's own date keeps a single run reproducible (re-running
+    # a day gives the same points) while varying across days.
+    rng = random.Random(acq or time.time())
+
+    # Positives get the same geographic rule as negatives. FIRMS is queried by
+    # bounding box, and CA_BBOX is a rectangle that covers large parts of Nevada,
+    # Arizona and the Pacific — so half of the "California" detections were not in
+    # California, while no-fire points have been CA-land-masked since 2026-06-19.
+    # That taught the model an inverted geographic prior (off-CA => fire in the
+    # daily feed, off-CA => no-fire in the 2020 base). One rule, both classes.
+    fires_on_land = [f for f in fires if on_ca_land(f[0], f[1])]
+    fires_off_land = len(fires) - len(fires_on_land)
+    fire_pts = fires_on_land[:MAX_FIRE_PER_RUN]
 
     # No-fire label verification (Layer 2 #1): a sampled "no-fire" point must be
     # genuinely fire-free. We reject it if it is (a) near any fire in a WIDER
@@ -306,8 +326,13 @@ def ingest():
         avoid_fires = fires
     perimeters = _load_active_perimeters()
 
+    # on_ca_land fails OPEN when the county boundaries can't be loaded, which
+    # would silently fill the no-fire class with ocean and out-of-state points.
+    # Check once and refuse to sample rather than poison the training set.
+    boundaries_ok = bool(_county_features())
+
     nofire_pts, tries = [], 0
-    nofire_target = min(MAX_NOFIRE_PER_RUN, max(len(fire_pts), 10))
+    nofire_target = 0 if not boundaries_ok else min(MAX_NOFIRE_PER_RUN, max(len(fire_pts), 10))
     while len(nofire_pts) < nofire_target and tries < 8000:
         tries += 1
         la, lo = rng.uniform(lat0, lat1), rng.uniform(lon0, lon1)
@@ -325,11 +350,21 @@ def ingest():
     dropped = []
     cross_dropped = []
     cross_checked = 0
-    start = time.monotonic()
     truncated = False
+
+    # Each class gets its OWN half of the time budget. Previously both classes
+    # shared one deadline and fires were processed first, so on a busy fire day
+    # the budget was gone before a single no-fire point was computed — negatives
+    # went to zero on 12 of the 14 ingest days after the cross-source check
+    # doubled the per-row cost, and the class balance ran to 86% positive.
+    # A separate deadline per class means a fire surge can no longer starve the
+    # negatives; at worst each class is truncated on its own.
+    per_class_budget = TIME_BUDGET_SECONDS / 2.0
+
     for label, pts in ((1, fire_pts), (0, nofire_pts)):
+        start = time.monotonic()
         for lat, lon, acq_date in pts:
-            if time.monotonic() - start > TIME_BUDGET_SECONDS:
+            if time.monotonic() - start > per_class_budget:
                 truncated = True
                 break
             if not acq_date:
@@ -362,8 +397,6 @@ def ingest():
                         cross_dropped.append({"lat": row["lat"], "lon": row["lon"], "reason": mm})
                         continue
             rows.append(row)
-        if truncated:
-            break
 
     # quality_ok is informational for the caller/alerting: false when nothing
     # clean came through, or when the majority of computed rows failed the gate
@@ -371,8 +404,15 @@ def ingest():
     computed = len(rows) + len(dropped)
     quality_ok = computed > 0 and len(dropped) <= computed * 0.5
 
+    # Per-class counts, so a collapsed no-fire class is visible in the response
+    # instead of only showing up months later as a class-imbalanced training set.
+    n_fire = sum(1 for r in rows if r["fire"] == 1)
     return jsonify({"ok": True, "fires_seen": len(fires),
+                    "fires_off_ca_land": fires_off_land,
                     "firms_lowconf_dropped": firms_lowconf, "count": len(rows),
+                    "fire_rows": n_fire, "nofire_rows": len(rows) - n_fire,
+                    "nofire_target": nofire_target, "nofire_sampled": len(nofire_pts),
+                    "boundaries_ok": boundaries_ok,
                     "dropped": len(dropped), "dropped_detail": dropped[:20],
                     "cross_source_checked": cross_checked,
                     "cross_source_dropped": len(cross_dropped),
@@ -707,6 +747,88 @@ def backtest():
         _id, _ = _send_alert_email("model backtest: low recall on recent fires", msg)
         emailed = _id is not None
     return jsonify({"ok": True, "healthy": healthy, "emailed": emailed, "report": report}), 200
+
+
+# Model staleness (#7): the failure that started this — the gate rejected six
+# consecutive retrains and the live model sat unchanged for eight weeks while the
+# weekly job reported success every Sunday. Nothing watched the one number that
+# mattered: how old the serving model is. A rejection is normal; a run of them,
+# or a model that has not moved in weeks, is a stuck pipeline.
+MODEL_MAX_AGE_DAYS = 21
+MAX_CONSECUTIVE_NON_PROMOTIONS = 3
+_MODEL_META = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           "ml", "models", "model_metadata.json")
+_RETRAIN_LOG = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "ml", "models", "RETRAIN_LOG.md")
+
+
+def _model_staleness():
+    """Age of the serving model and how many gate runs in a row failed to ship
+    one. Returns a JSON-able report; never raises."""
+    import datetime as _dt
+
+    trained_at, age_days = None, None
+    try:
+        with open(_MODEL_META) as f:
+            trained_at = str(json.load(f)["trained_at"])
+        t = _dt.datetime.strptime(trained_at[:10], "%Y-%m-%d")
+        age_days = (_dt.datetime.utcnow() - t).days
+    except Exception as e:
+        logger.warning("model metadata unreadable: %s", e)
+
+    streak, verdicts = 0, []
+    try:
+        with open(_RETRAIN_LOG) as f:
+            verdicts = re.findall(r"^## .+ — (PROMOTED|REJECTED|HELD)", f.read(), re.M)
+        for v in reversed(verdicts):
+            if v == "PROMOTED":
+                break
+            streak += 1
+    except Exception as e:
+        logger.warning("retrain log unreadable: %s", e)
+
+    too_old = age_days is not None and age_days > MODEL_MAX_AGE_DAYS
+    stuck = streak >= MAX_CONSECUTIVE_NON_PROMOTIONS
+    return {
+        "trained_at": trained_at,
+        "age_days": age_days,
+        "max_age_days": MODEL_MAX_AGE_DAYS,
+        "consecutive_non_promotions": streak,
+        "max_consecutive_non_promotions": MAX_CONSECUTIVE_NON_PROMOTIONS,
+        "gate_decisions": verdicts[-8:],
+        "model_too_old": too_old,
+        "gate_stuck": stuck,
+        "healthy": not (too_old or stuck),
+    }
+
+
+@ml_ingest_bp.route("/internal/ml/model-staleness", methods=["POST"])
+def model_staleness():
+    expected = os.getenv("INTERNAL_CRON_TOKEN", "")
+    if not expected:
+        return jsonify({"error": "INTERNAL_CRON_TOKEN not configured"}), 500
+    if request.headers.get("X-Internal-Token", "") != expected:
+        return jsonify({"error": "invalid X-Internal-Token"}), 401
+
+    report = _model_staleness()
+    emailed = False
+    if request.args.get("notify", "1") != "0" and not report["healthy"]:
+        bits = []
+        if report["model_too_old"]:
+            bits.append(f"The serving model is {report['age_days']} days old "
+                        f"(trained {report['trained_at']}); the threshold is "
+                        f"{MODEL_MAX_AGE_DAYS} days.")
+        if report["gate_stuck"]:
+            bits.append(f"The retrain gate has shipped nothing for "
+                        f"{report['consecutive_non_promotions']} runs in a row "
+                        f"({', '.join(report['gate_decisions'])}).")
+        bits.append("The weekly retrain is running but not replacing the model. "
+                    "Check the holdout size and the gate reasons in RETRAIN_LOG.md.")
+        _id, _ = _send_alert_email("model staleness: live model is not being replaced",
+                                   json.dumps(report, indent=2) + "\n\n" + " ".join(bits))
+        emailed = _id is not None
+    return jsonify({"ok": True, "healthy": report["healthy"],
+                    "emailed": emailed, "report": report}), 200
 
 
 # Feature audit (#6): cross-validate CACHED elevation against an independent DEM

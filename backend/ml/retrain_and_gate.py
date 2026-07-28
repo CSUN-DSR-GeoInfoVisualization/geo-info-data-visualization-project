@@ -29,12 +29,12 @@ import argparse
 import numpy as np
 import pandas as pd
 import joblib
-from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score, brier_score_loss, accuracy_score
 
 from ml.train_monotonic import (
     train_monotonic, validate_monotonicity, gate_passes, FEATURE_COLS, MONOTONIC_CST,
 )
+from ml.geo_checks import on_ca_land
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
 _MODELS_DIR = os.path.join(_DIR, "models")
@@ -54,8 +54,22 @@ _DAILY = os.path.join(_TRAIN_DIR, "california_daily.csv")
 AUROC_TOL = 0.005
 BRIER_TOL = 0.005
 
+# The comparison is made on rows collected AFTER the production model was
+# trained — the only rows it provably never saw. Below these sizes the holdout
+# can't support a decision, so the gate HOLDS (promotes nothing, rejects
+# nothing) instead of pretending to have an answer.
+MIN_HOLDOUT_ROWS = 120
+MIN_HOLDOUT_PER_CLASS = 30
 
-_DB_COLS = FEATURE_COLS + ["fire"]
+
+def holdout_sufficient(rows: int, positives: int, negatives: int) -> bool:
+    """Whether a temporal holdout can support a promote/reject decision at all.
+    Both classes must be represented: AUROC on a holdout with a handful of one
+    label is noise, and shipping a model on that basis is worse than holding."""
+    return rows >= MIN_HOLDOUT_ROWS and min(positives, negatives) >= MIN_HOLDOUT_PER_CLASS
+
+_DB_COLS = FEATURE_COLS + ["fire", "acq_date"]
+_GEO_COLS = ["lat", "lon"]
 
 
 def _load_dataset():
@@ -63,16 +77,17 @@ def _load_dataset():
     to the repo). De-dups identical rows so a re-ingested point can't double-count.
     Returns (df, description)."""
     frames, parts = [], []
+    want = _DB_COLS + _GEO_COLS
     for path in (_BASE, _DAILY):
         if os.path.exists(path):
             d = pd.read_csv(path)
-            if set(_DB_COLS).issubset(d.columns) and len(d):
-                frames.append(d[_DB_COLS])
+            if set(want).issubset(d.columns) and len(d):
+                frames.append(d[want])
                 parts.append(f"{os.path.basename(path)}({len(d)})")
 
     if not frames:
         raise FileNotFoundError(f"no training data found at {_BASE} or {_DAILY}")
-    df = pd.concat(frames, ignore_index=True).dropna(subset=_DB_COLS).drop_duplicates()
+    df = pd.concat(frames, ignore_index=True).dropna(subset=want).drop_duplicates()
 
     # Wind sanity check. A provider field-name bug recorded wind == 0 on a block of
     # ingested rows; being in-range AND constant, it evades the statistical outlier
@@ -81,10 +96,28 @@ def _load_dataset():
     before = len(df)
     df = df[df["wind"] > 0].reset_index(drop=True)
     dropped_wind = before - len(df)
+
+    # ONE geographic rule for BOTH classes (audit 2026-07-28). FIRMS positives are
+    # collected by bounding box and CA_BBOX is a rectangle covering large parts of
+    # Nevada, Arizona and the Pacific, while no-fire points are CA-land-sampled.
+    # That made "off CA land" a near-perfect predictor — of NO-FIRE in the 2020
+    # base (74% of its negatives are off-land) and of FIRE in the daily feed (56%
+    # of its positives were). The two halves taught opposite labels for the same
+    # terrain, and the model could not discriminate on new data. Restricting both
+    # classes to CA land removed the contradiction: on a July CA-land holdout,
+    # AUROC 0.516 -> 0.828 and Brier 0.229 -> 0.169 despite 32% fewer rows.
+    # Applied here, at load, so the committed CSVs stay an unedited record.
+    before = len(df)
+    keep = [on_ca_land(la, lo) for la, lo in zip(df["lat"], df["lon"])]
+    df = df[keep].reset_index(drop=True)
+    dropped_geo = before - len(df)
+
     desc = " + ".join(parts)
     if dropped_wind:
         desc += f" -{dropped_wind} wind<=0"
-    return df, desc
+    if dropped_geo:
+        desc += f" -{dropped_geo} off-CA-land"
+    return df.drop(columns=_GEO_COLS), desc
 
 
 def decide(cand_m, cand_phys_ok, cand_bad_features, prod_m, prod_phys_ok):
@@ -114,59 +147,144 @@ def decide(cand_m, cand_phys_ok, cand_bad_features, prod_m, prod_phys_ok):
 
 def _metrics(model, scaler, X, y):
     p = model.predict_proba(scaler.transform(X))[:, 1]
+    fires = p[y == 1]
     return {
         "auroc": float(roc_auc_score(y, p)),
         "brier": float(brier_score_loss(y, p)),
         "acc": float(accuracy_score(y, (p >= 0.5))),
+        # Reported, not gated: the fraction of real fires the model would have
+        # called High+ (>=0.40, ml.inference.risk_label). This is the number the
+        # weekly backtest alerts on, so it belongs in the retrain log next to it.
+        "recall_at_high": float((fires >= 0.40).mean()) if len(fires) else None,
     }
 
 
+def _prod_trained_at():
+    """The production model's training timestamp, or None if there is no usable
+    production model. Rows newer than this are the only ones it provably never
+    trained on — promote() refits on ALL rows, so anything older is memorised."""
+    if not (os.path.exists(_MODEL_OUT) and os.path.exists(_SCALER_OUT)):
+        return None
+    try:
+        with open(_META_OUT) as f:
+            return str(json.load(f)["trained_at"])[:10]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
 def evaluate(now_iso):
-    """Train a candidate and return a decision dict. Pure — writes nothing."""
+    """Train a candidate and return a decision dict. Pure — writes nothing.
+
+    Both models are scored on a TEMPORAL holdout: rows whose acq_date is newer
+    than the production model's trained_at. That is the only split that is
+    honest for both sides. The previous version compared production against the
+    candidate on a random split of the whole dataset — but promote() refits the
+    production model on every row, so production had memorised ~89% of that test
+    set and won every comparison (measured 2026-07-28: AUROC 0.989 on rows it
+    trained on vs 0.550 on rows it had never seen). That is what rejected six
+    consecutive retrains and left the model unchanged for eight weeks.
+    """
     df, dataset_desc = _load_dataset()
     X = df[FEATURE_COLS].values
     y = df["fire"].values
-    Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=0.2, stratify=y, random_state=42)
 
-    # Candidate trained on the train split (honest held-out eval).
-    cand, cand_scaler = train_monotonic(Xtr, ytr)
-    cand_m = _metrics(cand, cand_scaler, Xte, yte)
+    cutoff = _prod_trained_at()
+    if cutoff is None:
+        # No production model to beat: train on everything, promote on physics.
+        cand, cand_scaler = train_monotonic(X, y)
+        cand_phys = validate_monotonicity(cand, cand_scaler)
+        cand_phys_ok = gate_passes(cand_phys)
+        bad = [n for n, v in cand_phys.items() if not v["ok"]]
+        promote, reasons = decide(None, cand_phys_ok, bad, None, None)
+        return {
+            "when": now_iso, "dataset": dataset_desc, "rows": int(len(df)),
+            "holdout": {"cutoff": None, "rows": 0, "positives": 0, "negatives": 0},
+            "candidate": {"metrics": None, "physics_ok": cand_phys_ok, "physics": cand_phys},
+            "production": {"metrics": None, "physics_ok": None},
+            "promote": promote, "held": False, "reasons": reasons,
+            "_full_fit": (X, y),
+        }
+
+    is_new = df["acq_date"].astype(str) > cutoff
+    tr, te = df[~is_new], df[is_new]
+    n_pos, n_neg = int((te["fire"] == 1).sum()), int((te["fire"] == 0).sum())
+    holdout = {"cutoff": cutoff, "rows": int(len(te)),
+               "positives": n_pos, "negatives": n_neg}
+
+    # Candidate is trained ONLY on rows at or before the cutoff, so the holdout
+    # is unseen by both models and the comparison is symmetric.
+    cand, cand_scaler = train_monotonic(tr[FEATURE_COLS].values, tr["fire"].values)
     cand_phys = validate_monotonicity(cand, cand_scaler)
     cand_phys_ok = gate_passes(cand_phys)
-
-    # Current production model, evaluated on the SAME held-out split.
-    prod_m, prod_phys_ok = None, None
-    if os.path.exists(_MODEL_OUT) and os.path.exists(_SCALER_OUT):
-        pm = joblib.load(_MODEL_OUT)
-        ps = joblib.load(_SCALER_OUT)
-        prod_m = _metrics(pm, ps, Xte, yte)
-        prod_phys_ok = gate_passes(validate_monotonicity(pm, ps))
-
     bad = [n for n, v in cand_phys.items() if not v["ok"]]
+
+    # Not enough new data to judge: hold. Never silently reject on thin evidence
+    # — a hold is visible in the log and trips the staleness alarm if it repeats.
+    if not holdout_sufficient(len(te), n_pos, n_neg):
+        return {
+            "when": now_iso, "dataset": dataset_desc, "rows": int(len(df)),
+            "holdout": holdout,
+            "candidate": {"metrics": None, "physics_ok": cand_phys_ok, "physics": cand_phys},
+            "production": {"metrics": None, "physics_ok": None},
+            "promote": False, "held": True,
+            "reasons": [f"insufficient holdout since {cutoff}: {len(te)} rows "
+                        f"({n_pos} fire / {n_neg} no-fire); need >={MIN_HOLDOUT_ROWS} "
+                        f"and >={MIN_HOLDOUT_PER_CLASS} of each"],
+            "_full_fit": (X, y),
+        }
+
+    Xte, yte = te[FEATURE_COLS].values, te["fire"].values
+    cand_m = _metrics(cand, cand_scaler, Xte, yte)
+    pm, ps = joblib.load(_MODEL_OUT), joblib.load(_SCALER_OUT)
+    prod_m = _metrics(pm, ps, Xte, yte)
+    prod_phys_ok = gate_passes(validate_monotonicity(pm, ps))
+
     promote, reasons = decide(cand_m, cand_phys_ok, bad, prod_m, prod_phys_ok)
 
     return {
         "when": now_iso,
         "dataset": dataset_desc,
         "rows": int(len(df)),
+        "holdout": holdout,
         "candidate": {"metrics": cand_m, "physics_ok": cand_phys_ok, "physics": cand_phys},
         "production": {"metrics": prod_m, "physics_ok": prod_phys_ok},
         "promote": promote,
+        "held": False,
         "reasons": reasons,
-        # carry the fitted full-data model for promotion (re-fit on ALL rows)
+        # carry the data for promotion (final model re-fits on ALL rows; that is
+        # safe because the NEXT run's holdout is defined by the new trained_at)
         "_full_fit": (X, y),
     }
 
 
+def _fmt(m, phys_ok):
+    if not m:
+        return "not scored"
+    rec = "n/a" if m.get("recall_at_high") is None else f"{m['recall_at_high']:.3f}"
+    return (f"AUROC={m['auroc']:.4f} Brier={m['brier']:.4f} "
+            f"recall@High={rec} physics_ok={phys_ok}")
+
+
 def _append_log(decision):
     head = "# Retrain Log\n\n" if not os.path.exists(_LOG) else ""
-    c = decision["candidate"]["metrics"]
-    p = decision["production"]["metrics"]
+    if decision["promote"]:
+        verdict = "PROMOTED"
+    elif decision.get("held"):
+        verdict = "HELD"
+    else:
+        verdict = "REJECTED"
+    h = decision.get("holdout") or {}
+    holdout_line = (
+        f"- holdout: {h.get('rows', 0)} rows newer than {h.get('cutoff')} "
+        f"({h.get('positives', 0)} fire / {h.get('negatives', 0)} no-fire)\n"
+        if h.get("cutoff") else "- holdout: none (no production model)\n"
+    )
     line = (
-        f"## {decision['when']} — {'PROMOTED' if decision['promote'] else 'REJECTED'}\n"
+        f"## {decision['when']} — {verdict}\n"
         f"- dataset: {decision['dataset']} ({decision['rows']} rows)\n"
-        f"- candidate: AUROC={c['auroc']:.4f} Brier={c['brier']:.4f} physics_ok={decision['candidate']['physics_ok']}\n"
-        f"- production: {'AUROC=%.4f Brier=%.4f physics_ok=%s' % (p['auroc'], p['brier'], decision['production']['physics_ok']) if p else 'none'}\n"
+        + holdout_line +
+        f"- candidate: {_fmt(decision['candidate']['metrics'], decision['candidate']['physics_ok'])}\n"
+        f"- production: {_fmt(decision['production']['metrics'], decision['production']['physics_ok'])}\n"
         f"- reasons: {'; '.join(decision['reasons'])}\n\n"
     )
     with open(_LOG, "a") as f:
@@ -192,6 +310,7 @@ def promote(decision, now_iso):
     model, scaler = train_monotonic(X, y)  # final model uses ALL rows
     joblib.dump(model, _MODEL_OUT)
     joblib.dump(scaler, _SCALER_OUT)
+    cand_m = decision["candidate"]["metrics"]
     meta = {
         "model_type": "monotonic_hgb_isotonic",
         "feature_cols": FEATURE_COLS,
@@ -199,7 +318,11 @@ def promote(decision, now_iso):
         "trained_at": now_iso,
         "dataset": decision["dataset"],
         "rows": decision["rows"],
-        "heldout_auroc": decision["candidate"]["metrics"]["auroc"],
+        # None on a re-baseline or a first model: there was no holdout large
+        # enough to score against, and the reason below says why it shipped.
+        "heldout_auroc": cand_m["auroc"] if cand_m else None,
+        "holdout": decision.get("holdout"),
+        "promoted_because": "; ".join(decision["reasons"]),
     }
     with open(_META_OUT, "w") as f:
         json.dump(meta, f, indent=2)
@@ -209,17 +332,31 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true", help="evaluate only; never write")
     ap.add_argument("--now", default=None, help="ISO timestamp (CI passes this; scripts can't call datetime here)")
+    ap.add_argument("--rebaseline", metavar="REASON",
+                    help="Promote the physics-passing candidate WITHOUT comparing it to "
+                         "the incumbent, recording REASON in the log. For use only after a "
+                         "correction that invalidates the incumbent as a baseline (e.g. it "
+                         "was trained on data since found to be corrupt) — comparing against "
+                         "a model trained on bad data measures nothing. Never used by the "
+                         "weekly cron; a human runs it deliberately and the reason is logged.")
     args = ap.parse_args()
     now_iso = args.now or "1970-01-01T00:00:00"
 
     d = evaluate(now_iso)
-    c = d["candidate"]["metrics"]
+    if args.rebaseline and d["candidate"]["physics_ok"]:
+        d["promote"], d["held"] = True, False
+        d["reasons"] = [f"RE-BASELINE (manual): {args.rebaseline}"]
+    elif args.rebaseline:
+        d["reasons"] = ["re-baseline refused: candidate FAILS physics"] + d["reasons"]
+    h = d.get("holdout") or {}
     print(f"dataset={d['dataset']} rows={d['rows']}")
-    print(f"candidate: AUROC={c['auroc']:.4f} Brier={c['brier']:.4f} physics_ok={d['candidate']['physics_ok']}")
-    if d["production"]["metrics"]:
-        p = d["production"]["metrics"]
-        print(f"production: AUROC={p['auroc']:.4f} Brier={p['brier']:.4f} physics_ok={d['production']['physics_ok']}")
-    print("DECISION:", "PROMOTE" if d["promote"] else "REJECT", "—", "; ".join(d["reasons"]))
+    if h.get("cutoff"):
+        print(f"holdout: {h['rows']} rows newer than {h['cutoff']} "
+              f"({h['positives']} fire / {h['negatives']} no-fire)")
+    print(f"candidate: {_fmt(d['candidate']['metrics'], d['candidate']['physics_ok'])}")
+    print(f"production: {_fmt(d['production']['metrics'], d['production']['physics_ok'])}")
+    verdict = "PROMOTE" if d["promote"] else ("HOLD" if d.get("held") else "REJECT")
+    print("DECISION:", verdict, "—", "; ".join(d["reasons"]))
 
     if args.dry_run:
         print("(dry-run — no files written)")
