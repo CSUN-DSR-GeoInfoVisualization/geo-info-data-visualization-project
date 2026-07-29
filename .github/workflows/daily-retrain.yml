@@ -3,7 +3,7 @@ name: Daily training ingest + gated retrain
 # Continuous model improvement, fully in GitHub (zero database cost-risk):
 #   1. ingest  : ask the backend for the last 2 days of FIRMS detections +
 #                computed features, and append the NEW ones (deduped against the
-#                committed set) to california_daily.csv. A 2-day window is needed
+#                committed set) to california_matched.csv. A 2-day window is needed
 #                because FIRMS near-real-time has not posted the current UTC day's
 #                VIIRS granules yet at 08:00 UTC, so days=1 saw fires_seen=0 and
 #                the dataset stopped growing after 2026-07-10.
@@ -45,7 +45,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # full history so the staleness watchdog can read california_daily.csv's last-changed date
+          fetch-depth: 0   # full history so the staleness watchdog can read california_matched.csv's last-changed date
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -125,7 +125,7 @@ jobs:
 
           if not rows:
               raise SystemExit(0)
-          path = "backend/ml/training_data/california_daily.csv"
+          path = "backend/ml/training_data/california_matched.csv"
           exists = os.path.exists(path)
           # Dedup: a >=2-day FIRMS window re-returns detections already captured on
           # a previous run, so append only rows whose (lat, lon, acq_date) is not
@@ -173,7 +173,7 @@ jobs:
           # stages NOTHING if any pathspec is missing (quarantine.csv only exists
           # on days with dropped rows). That regression silently dropped every
           # daily commit from 2026-06-20 on. Separate adds avoid it.
-          git add backend/ml/training_data/california_daily.csv || true
+          git add backend/ml/training_data/california_matched.csv || true
           [ -f backend/ml/training_data/quarantine.csv ] && git add backend/ml/training_data/quarantine.csv || true
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.promote }}" = "true" ]; then
             git add backend/ml/models/wildfire_model_predictive.pkl \
@@ -203,14 +203,14 @@ jobs:
       - name: Staleness watchdog — alert if training data stops growing
         # Runs even when earlier steps fail. ANY failure mode (FIRMS outage,
         # endpoint 502, credential lapse, code bug) shows up the same way: the
-        # dataset stops growing. If california_daily.csv has not grown on 2 daily
+        # dataset stops growing. If california_matched.csv has not grown on 2 daily
         # runs in a row (2+ calendar days), email AND fail red — this is the alarm
         # the silent 2026-07-10..07-20 and 2026-11-06..20 freezes lacked.
         if: always()
         env:
           TOKEN: ${{ secrets.INTERNAL_CRON_TOKEN }}
         run: |
-          LAST=$(git log -1 --format=%ct -- backend/ml/training_data/california_daily.csv 2>/dev/null || echo 0)
+          LAST=$(git log -1 --format=%ct -- backend/ml/training_data/california_matched.csv 2>/dev/null || echo 0)
           NOW=$(date -u +%s)
           # Calendar days, not elapsed 24h blocks: scheduled runs drift by hours, so
           # a second missed day could land at 47h and floor to 1.
@@ -220,7 +220,7 @@ jobs:
             echo "::warning::FireScope training data stalled ${AGE} days"
             curl -s -X POST --max-time 60 -H "X-Internal-Token: $TOKEN" \
               -H "Content-Type: application/json" \
-              -d "{\"subject\":\"FireScope: training data stalled ${AGE} days\",\"message\":\"california_daily.csv has not grown in ${AGE} days. The daily ingest/training loop may be silently failing — check the daily-retrain workflow run logs and the FIRMS /ingest endpoint.\"}" \
+              -d "{\"subject\":\"FireScope: training data stalled ${AGE} days\",\"message\":\"california_matched.csv has not grown in ${AGE} days. The daily ingest/training loop may be silently failing — check the daily-retrain workflow run logs and the FIRMS /ingest endpoint.\"}" \
               "https://firescope-api.onrender.com/api/internal/ml/alert" || true
             # Fail red so GitHub's own failure notification fires: the email above
             # went out daily from 2026-11-08 while the run stayed green and unnoticed.
