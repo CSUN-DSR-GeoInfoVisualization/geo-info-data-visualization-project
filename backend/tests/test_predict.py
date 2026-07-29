@@ -50,7 +50,13 @@ def test_predict_risk_level_is_valid_label(client):
         resp = client.post('/api/predict', json={'lat': 34.05, 'lon': -118.25})
 
     data = resp.get_json()
-    assert data['prediction']['risk_level'] in ('Low', 'Medium', 'High', 'Extreme')
+    # The canonical 5-tier scale is defined in ml/inference.py risk_label:
+    # Low / Moderate / High / Very High / Extreme. This assertion previously read
+    # ('Low', 'Medium', 'High', 'Extreme') — "Medium" is not a tier at all, and
+    # "Moderate" and "Very High" were missing, so it passed only because the model
+    # of the day happened to land on one of the four listed labels.
+    assert data['prediction']['risk_level'] in (
+        'Low', 'Moderate', 'High', 'Very High', 'Extreme')
 
 
 def test_predict_risk_probability_in_range(client):

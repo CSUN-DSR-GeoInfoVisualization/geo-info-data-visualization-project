@@ -316,6 +316,17 @@ def ingest():
     fires_off_land = len(fires) - len(fires_on_land)
     fire_pts = fires_on_land[:MAX_FIRE_PER_RUN]
 
+    # NOTE (audit 2026-07-28): these random-location negatives are the reason the
+    # physical priors came out INVERTED in the pooled training data — sampling
+    # uniformly over California made the model compare WHERE fires happen against
+    # WHERE random points land (fires measured more humid, 34.9% vs 25.3%, cooler
+    # and calmer), so the monotonic constraint correctly refused to learn humidity
+    # and it ended up with zero influence. The trainer now reads the matched-control
+    # set (california_matched.csv) instead, so rows appended here no longer reach
+    # the model. Replacing this sampler with matched controls requires date-aware
+    # EVI and KBDI, which do not exist yet — backdating only the weather would pair
+    # last year's wind with today's drought.
+    #
     # No-fire label verification (Layer 2 #1): a sampled "no-fire" point must be
     # genuinely fire-free. We reject it if it is (a) near any fire in a WIDER
     # window than today's (so a fire from 2-3 days ago, or one FIRMS caught

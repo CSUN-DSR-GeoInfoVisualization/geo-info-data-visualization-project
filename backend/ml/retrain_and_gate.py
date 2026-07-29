@@ -32,7 +32,8 @@ import joblib
 from sklearn.metrics import roc_auc_score, brier_score_loss, accuracy_score
 
 from ml.train_monotonic import (
-    train_monotonic, validate_monotonicity, gate_passes, FEATURE_COLS, MONOTONIC_CST,
+    train_monotonic, validate_monotonicity, gate_passes, dead_constrained_features,
+    FEATURE_COLS, MONOTONIC_CST,
 )
 from ml.geo_checks import on_ca_land
 
@@ -50,6 +51,19 @@ _LOG = os.path.join(_MODELS_DIR, "RETRAIN_LOG.md")
 # them and de-dups.
 _BASE = os.path.join(_TRAIN_DIR, "california_2020_kbdi.csv")
 _DAILY = os.path.join(_TRAIN_DIR, "california_daily.csv")
+
+# Matched-control training set (built 2026-07-28). Every positive is paired with
+# controls at the SAME lat/lon — one in the wet season and one on the same
+# calendar date a year earlier — so terrain, vegetation type and elevation cancel
+# and what remains is weather and drought.
+#
+# It replaces _BASE/_DAILY rather than adding to them because those two encode a
+# different EVI quantity: build_dataset.py stores the SPRING (May 1) composite as
+# a pre-season fuel-load proxy, while the live path (data.live_evi_gee) serves the
+# CURRENT composite. Mixing the two would put two different variables in one
+# column. The matched set uses date-matched EVI throughout, which is the quantity
+# inference actually receives.
+_MATCHED = os.path.join(_TRAIN_DIR, "california_matched.csv")
 
 AUROC_TOL = 0.005
 BRIER_TOL = 0.005
@@ -78,7 +92,8 @@ def _load_dataset():
     Returns (df, description)."""
     frames, parts = [], []
     want = _DB_COLS + _GEO_COLS
-    for path in (_BASE, _DAILY):
+    sources = (_MATCHED,) if os.path.exists(_MATCHED) else (_BASE, _DAILY)
+    for path in sources:
         if os.path.exists(path):
             d = pd.read_csv(path)
             if set(want).issubset(d.columns) and len(d):
@@ -117,7 +132,9 @@ def _load_dataset():
         desc += f" -{dropped_wind} wind<=0"
     if dropped_geo:
         desc += f" -{dropped_geo} off-CA-land"
-    return df.drop(columns=_GEO_COLS), desc
+    # lat/lon are kept: the holdout is split by LOCATION, because a fire and its
+    # matched controls share a point and must never straddle the split.
+    return df, desc
 
 
 def decide(cand_m, cand_phys_ok, cand_bad_features, prod_m, prod_phys_ok):
@@ -205,8 +222,17 @@ def evaluate(now_iso):
             "_full_fit": (X, y),
         }
 
-    is_new = df["acq_date"].astype(str) > cutoff
-    tr, te = df[~is_new], df[is_new]
+    # Split by FIRE EVENT, not by row date. A control carries a historical
+    # acq_date (the same point a year earlier, or the preceding wet season), so
+    # a plain date filter would put every fire on the new side and every control
+    # on the old side — the holdout would be single-class and the model could
+    # also see a location on both sides of the split. Group each location by the
+    # date of its most recent fire and move the whole group together.
+    loc = (df["lat"].round(5).astype(str) + "," + df["lon"].round(5).astype(str))
+    fire_dates = (df.assign(_loc=loc)[df["fire"] == 1]
+                    .groupby("_loc")["acq_date"].max().astype(str))
+    loc_is_new = loc.map(fire_dates).fillna("") > cutoff
+    tr, te = df[~loc_is_new], df[loc_is_new]
     n_pos, n_neg = int((te["fire"] == 1).sum()), int((te["fire"] == 0).sum())
     holdout = {"cutoff": cutoff, "rows": int(len(te)),
                "positives": n_pos, "negatives": n_neg}
@@ -217,6 +243,7 @@ def evaluate(now_iso):
     cand_phys = validate_monotonicity(cand, cand_scaler)
     cand_phys_ok = gate_passes(cand_phys)
     bad = [n for n, v in cand_phys.items() if not v["ok"]]
+    dead = dead_constrained_features(cand_phys)
 
     # Not enough new data to judge: hold. Never silently reject on thin evidence
     # — a hold is visible in the log and trips the staleness alarm if it repeats.
@@ -240,12 +267,18 @@ def evaluate(now_iso):
     prod_phys_ok = gate_passes(validate_monotonicity(pm, ps))
 
     promote, reasons = decide(cand_m, cand_phys_ok, bad, prod_m, prod_phys_ok)
+    if dead:
+        # Not a veto — a dead feature means the DATA carries no usable signal in
+        # the physically-correct direction, and blocking would keep a worse model
+        # live without fixing that. But it must never pass silently again.
+        reasons.append(f"WARNING: constrained feature(s) with no effect: {', '.join(dead)}")
 
     return {
         "when": now_iso,
         "dataset": dataset_desc,
         "rows": int(len(df)),
         "holdout": holdout,
+        "dead_features": dead,
         "candidate": {"metrics": cand_m, "physics_ok": cand_phys_ok, "physics": cand_phys},
         "production": {"metrics": prod_m, "physics_ok": prod_phys_ok},
         "promote": promote,
