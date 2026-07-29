@@ -238,7 +238,12 @@ def health_report(recent_window: int = RECENT_WINDOW,
         "outlier_rate_threshold": OUTLIER_RATE_THRESHOLD,
         "psi_threshold": PSI_THRESHOLD,
         "drift_evaluated": drift_evaluated,
-        "drift_basis": "fire rows only; wind>0 and CA-land, matching the trainer",
+        # This watches the daily INGEST FEED, which is not the same population the
+        # trainer reads (that is california_matched.csv). The feed is still worth
+        # monitoring — it is where new fire observations come from — but a clean
+        # bill of health here does not by itself mean the training set is healthy.
+        "drift_basis": "fire rows only, wind>0 and CA-land, from the daily ingest feed",
+        "monitors": "daily ingest feed (not the matched training set)",
         "drift_rows": {"earlier_fire": int(len(e_fire)), "recent_fire": int(len(r_fire))},
         "drift": drift,
         "drifted_features": drifted,

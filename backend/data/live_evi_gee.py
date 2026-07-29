@@ -50,6 +50,51 @@ def _tile(lat: float, lon: float) -> tuple[Decimal, Decimal]:
     return Decimal(f"{round(lat, 2):.4f}"), Decimal(f"{round(lon, 2):.4f}")
 
 
+def _evi_composite(lat: float, lon: float, as_of: "_dt.date") -> tuple[float, "_dt.date"]:
+    """Scaled EVI from the newest MOD13Q1 composite at or before `as_of`, plus
+    that composite's date. Shared by the live and historical entry points so
+    both compute the same quantity from the same product."""
+    _ensure_ee_initialized()
+    import ee
+
+    start = as_of - _dt.timedelta(days=32)
+    img = (
+        ee.ImageCollection("MODIS/061/MOD13Q1")
+        .filterDate(start.isoformat(), as_of.isoformat())
+        .select("EVI")
+        .sort("system:time_start", False)
+        .first()
+    )
+    point = ee.Geometry.Point([lon, lat])
+    info = img.reduceRegion(reducer=ee.Reducer.first(), geometry=point, scale=250).getInfo()
+    raw = info.get("EVI") if isinstance(info, dict) else None
+    if raw is None:
+        raise RuntimeError(f"GEE returned no EVI for {lat},{lon} as of {as_of}")
+
+    millis = img.get("system:time_start").getInfo()
+    composite_date = (
+        _dt.datetime.utcfromtimestamp(millis / 1000.0).date()
+        if isinstance(millis, (int, float)) else as_of
+    )
+    return float(raw) * 0.0001, composite_date
+
+
+def get_evi_at(lat: float, lon: float, date_str: str) -> float:
+    """EVI as it was on a PAST date. Not cached — the tile cache is keyed by
+    location only and holds the CURRENT composite, so writing a historical value
+    into it would poison live serving.
+
+    Needed for matched control rows: a control is the same point on an earlier
+    date, and it must carry that date's vegetation state. Note the committed
+    2020 base CSV instead stores the SPRING (May 1) composite as a pre-season
+    fuel-load proxy (ml/build_dataset.py), which is a different quantity from
+    what this and get_evi_live return.
+    """
+    as_of = _dt.datetime.strptime(date_str, "%Y-%m-%d").date()
+    scaled, _ = _evi_composite(lat, lon, as_of)
+    return scaled
+
+
 def get_evi_live(lat: float, lon: float) -> float:
     """Return current scaled EVI at (lat, lon) from MOD13Q1 (250 m).
 
@@ -67,30 +112,7 @@ def get_evi_live(lat: float, lon: float) -> float:
     if cached is not None and cached.composite_date >= cutoff:
         return float(cached.evi)
 
-    _ensure_ee_initialized()
-    import ee
-
-    end = today
-    start = end - _dt.timedelta(days=32)
-    img = (
-        ee.ImageCollection("MODIS/061/MOD13Q1")
-        .filterDate(start.isoformat(), end.isoformat())
-        .select("EVI")
-        .sort("system:time_start", False)
-        .first()
-    )
-    point = ee.Geometry.Point([lon, lat])
-    info = img.reduceRegion(reducer=ee.Reducer.first(), geometry=point, scale=250).getInfo()
-    raw = info.get("EVI") if isinstance(info, dict) else None
-    if raw is None:
-        raise RuntimeError(f"GEE returned no EVI for {lat},{lon}")
-    scaled = float(raw) * 0.0001
-
-    millis = img.get("system:time_start").getInfo()
-    composite_date = (
-        _dt.datetime.utcfromtimestamp(millis / 1000.0).date()
-        if isinstance(millis, (int, float)) else today
-    )
+    scaled, composite_date = _evi_composite(lat, lon, today)
     try:
         db.session.merge(FeatureCacheEvi(
             tile_lat=tlat, tile_lon=tlon, evi=scaled,

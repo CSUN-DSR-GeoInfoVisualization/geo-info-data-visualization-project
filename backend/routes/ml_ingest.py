@@ -17,15 +17,15 @@ import json
 import time
 import random
 import logging
-from datetime import datetime
 
 import requests
+from datetime import datetime
 from flask import Blueprint, request, jsonify
 
 from data.features import get_feature
 from data.live_weather import get_weather_daily
 from data.weather_crosscheck import get_weather_second
-from ml.geo_checks import on_ca_land, in_any_perimeter, _county_features
+from ml.geo_checks import on_ca_land, _county_features
 
 logger = logging.getLogger(__name__)
 ml_ingest_bp = Blueprint("ml_ingest", __name__)
@@ -46,13 +46,20 @@ CA_BBOX = (-124.0, 32.0, -114.0, 42.0)  # lon_min, lat_min, lon_max, lat_max
 # the point count low AND enforce a hard wall-clock budget below. The dataset
 # grows across daily runs, so a modest per-run count is fine.
 MAX_FIRE_PER_RUN = 15
-MAX_NOFIRE_PER_RUN = 15
 # Point-loop budget. Lowered from 55 because each run now also does pre-loop work
 # (active-perimeter load + a wider FIRMS avoidance fetch) and a per-point
 # cross-source weather call; keeping the loop at 35s leaves comfortable headroom
 # under the gunicorn worker timeout. The dataset grows across daily runs, so a
 # smaller per-run yield is fine.
-TIME_BUDGET_SECONDS = 35
+TIME_BUDGET_SECONDS = 60
+# Each class gets its OWN slice of the budget. Previously both shared one
+# deadline with fires processed first, so a busy fire day left nothing for the
+# negatives — they hit zero on 12 of 14 ingest days. Controls now get the larger
+# slice because they are the expensive class: a matched control needs archive
+# weather + a NASA POWER drought spinup + a GEE composite for its historical
+# date, roughly three times the work of a live fire row.
+FIRE_BUDGET_SECONDS = 20
+CONTROL_BUDGET_SECONDS = 40
 
 # Column order the workflow appends to california_daily.csv (must match the base
 # CSV header: the 6 features + label, plus provenance).
@@ -151,14 +158,16 @@ def _weather_for_date(lat, lon, date_str):
         return None
 
 
-def _features_for_date(lat, lon, date_str, strict=False):
+def _features_for_date(lat, lon, date_str):
     """Like _features_for but with weather AT the given date (archive). Falls back
-    to current weather if the archive has no data for that date yet, unless
-    strict (backfill), where current weather would mislabel a past row."""
+    to current weather if the archive has no data for that date yet.
+
+    EVI and KBDI are the CURRENT values, which is acceptable only because the one
+    caller (the backtest) scores fires from the last few days, where "current" and
+    "at the fire" are the same composite and the same drought window. For dates
+    further back use _features_for_historical."""
     wx = _weather_for_date(lat, lon, date_str)
     if wx is None:
-        if strict:
-            raise ValueError(f"no archive weather for {date_str}")
         return _features_for(lat, lon)
     return {
         "evi": float(get_feature(lat, lon, "evi")),
@@ -167,6 +176,39 @@ def _features_for_date(lat, lon, date_str, strict=False):
         "humidity": wx["humidity"],
         "elevation": float(get_feature(lat, lon, "elevation")),
         "kbdi": float(get_feature(lat, lon, "kbdi")),
+    }
+
+
+def _prior_year(date_str):
+    """Same calendar date, one year earlier — the matched control's date."""
+    import datetime as _dt
+    t = _dt.datetime.strptime(date_str, "%Y-%m-%d")
+    try:
+        return t.replace(year=t.year - 1).strftime("%Y-%m-%d")
+    except ValueError:                      # 29 February
+        return t.replace(year=t.year - 1, day=28).strftime("%Y-%m-%d")
+
+
+def _features_for_historical(lat, lon, date_str):
+    """EVERY time-varying feature as it was on `date_str` — weather, vegetation
+    and drought. Used to build matched control rows a year back, where reusing
+    today's EVI or KBDI would pair last year's wind with this year's drought and
+    manufacture a row that never existed.
+
+    Elevation is static, so it is read normally. Raises if any historical fetch
+    fails; the caller drops the point rather than emitting a half-backdated row."""
+    wx = _weather_for_date(lat, lon, date_str)
+    if wx is None:
+        raise RuntimeError(f"no archive weather for {lat},{lon} on {date_str}")
+    from data.live_evi_gee import get_evi_at
+    from data.live_kbdi import get_kbdi_at
+    return {
+        "evi": float(get_evi_at(lat, lon, date_str)),
+        "air_temp_encoded": wx["air_temp_encoded"],
+        "wind": wx["wind"],
+        "humidity": wx["humidity"],
+        "elevation": float(get_feature(lat, lon, "elevation")),
+        "kbdi": float(get_kbdi_at(lat, lon, date_str)),
     }
 
 
@@ -199,9 +241,6 @@ def _weather_mismatch(row, second):
             return f"{name} disagree: primary={a:.1f} second={b:.1f} (>{tol})"
     return None
 
-
-def _far_from_fires(lat, lon, fires, min_deg=0.15):
-    return all((lat - flat) ** 2 + (lon - flon) ** 2 >= min_deg ** 2 for flat, flon, _ in fires)
 
 
 # Label-quality gate (Layer 2a): drop low-confidence FIRMS detections. VIIRS
@@ -254,25 +293,6 @@ def _fetch_firms(days, date=""):
     return out, low
 
 
-def _load_active_perimeters():
-    """Active NIFC fire perimeters for the no-fire label check. Prefer the cached
-    copy (already warmed by the website / daily prewarm); fall back to the live
-    compute. Fail-open to an empty set so a fetch problem never blocks ingest."""
-    try:
-        from services.cache import _load_from_db
-        entry = _load_from_db("fire_perimeters")
-        if entry and entry.get("data"):
-            data = entry["data"]
-            return json.loads(data) if isinstance(data, str) else data
-    except Exception as e:
-        logger.warning("perimeter cache read failed: %s", e)
-    try:
-        from routes.predict import _compute_nifc_perimeters
-        return _compute_nifc_perimeters()
-    except Exception as e:
-        logger.warning("perimeter live compute failed: %s", e)
-        return {"features": []}
-
 
 @ml_ingest_bp.route("/internal/ml/ingest", methods=["POST"])
 def ingest():
@@ -296,15 +316,7 @@ def ingest():
         logger.warning("FIRMS fetch failed: %s", e)
         return jsonify({"error": f"FIRMS fetch failed: {e}"}), 502
 
-    lon0, lat0, lon1, lat1 = CA_BBOX
     acq = fires[0][2] if fires else request.args.get("date", "")
-
-    # Per-run seed. This was random.Random(20260603) — a CONSTANT, reconstructed
-    # on every run, so every ingest walked the identical candidate sequence and
-    # the no-fire class collapsed to 17 distinct coordinates across 159 rows.
-    # Seeding from the run's own date keeps a single run reproducible (re-running
-    # a day gives the same points) while varying across days.
-    rng = random.Random(acq or time.time())
 
     # Positives get the same geographic rule as negatives. FIRMS is queried by
     # bounding box, and CA_BBOX is a rectangle that covers large parts of Nevada,
@@ -316,44 +328,29 @@ def ingest():
     fires_off_land = len(fires) - len(fires_on_land)
     fire_pts = fires_on_land[:MAX_FIRE_PER_RUN]
 
-    # NOTE (audit 2026-07-28): these random-location negatives are the reason the
-    # physical priors came out INVERTED in the pooled training data — sampling
-    # uniformly over California made the model compare WHERE fires happen against
-    # WHERE random points land (fires measured more humid, 34.9% vs 25.3%, cooler
-    # and calmer), so the monotonic constraint correctly refused to learn humidity
-    # and it ended up with zero influence. The trainer now reads the matched-control
-    # set (california_matched.csv) instead, so rows appended here no longer reach
-    # the model. Replacing this sampler with matched controls requires date-aware
-    # EVI and KBDI, which do not exist yet — backdating only the weather would pair
-    # last year's wind with today's drought.
+    # No-fire rows are MATCHED CONTROLS: the SAME point, one year earlier.
     #
-    # No-fire label verification (Layer 2 #1): a sampled "no-fire" point must be
-    # genuinely fire-free. We reject it if it is (a) near any fire in a WIDER
-    # window than today's (so a fire from 2-3 days ago, or one FIRMS caught
-    # adjacent, still excludes it), or (b) inside an active NIFC fire perimeter.
-    # Plus a CA-land mask (#2) so no-fire points are never ocean / out-of-state.
-    avoid_fires, _ = (_fetch_firms(max(days, 3), date) if FIRMS_MAP_KEY else ([], 0))
-    if not avoid_fires:
-        avoid_fires = fires
-    perimeters = _load_active_perimeters()
-
-    # on_ca_land fails OPEN when the county boundaries can't be loaded, which
-    # would silently fill the no-fire class with ocean and out-of-state points.
-    # Check once and refuse to sample rather than poison the training set.
+    # They used to be uniform-random California points, which made the model
+    # compare WHERE fires happen against WHERE random points land. Measured over
+    # 1045 rows, that inverted three of the four physical priors — fire rows came
+    # out MORE humid (34.9% vs 25.3%), cooler and calmer than the negatives — and
+    # the monotonic constraint correctly refused to learn them, leaving humidity
+    # with exactly zero influence on the shipped model.
+    #
+    # A within-location paired test over 120 fire points showed the priors hold
+    # once terrain is fixed: at the SAME lat/lon a fire day is 32.7 points drier
+    # (98% of locations, p=3e-37), 15.3 C hotter (97%) and 0.47 m/s windier (73%)
+    # than a control day. Matching on location cancels terrain, vegetation type,
+    # elevation and regional climate, so what the model learns is weather and
+    # drought — which is what it is asked at inference time.
+    #
+    # Known limitation: without a FIRMS archive key we cannot confirm the pixel
+    # did not also burn on that date a year earlier. Reburn of the same 250 m
+    # pixel within a year is unlikely (the fuel is gone), but these are assumed
+    # negatives, not verified ones.
     boundaries_ok = bool(_county_features())
-
-    nofire_pts, tries = [], 0
-    nofire_target = 0 if not boundaries_ok else min(MAX_NOFIRE_PER_RUN, max(len(fire_pts), 10))
-    while len(nofire_pts) < nofire_target and tries < 8000:
-        tries += 1
-        la, lo = rng.uniform(lat0, lat1), rng.uniform(lon0, lon1)
-        if not on_ca_land(la, lo):
-            continue
-        if not _far_from_fires(la, lo, avoid_fires):
-            continue
-        if in_any_perimeter(la, lo, perimeters):
-            continue
-        nofire_pts.append((la, lo, acq))
+    nofire_pts = [(la, lo, _prior_year(a)) for la, lo, a in fire_pts]
+    nofire_target = len(nofire_pts)
 
     # Cross-check compares against CURRENT weather, so it is meaningless on backfill rows.
     crosscheck = CROSSCHECK_ENABLED and request.args.get("crosscheck", "1") != "0" and not date
@@ -363,32 +360,29 @@ def ingest():
     cross_checked = 0
     truncated = False
 
-    # Each class gets its OWN half of the time budget. Previously both classes
-    # shared one deadline and fires were processed first, so on a busy fire day
-    # the budget was gone before a single no-fire point was computed — negatives
-    # went to zero on 12 of the 14 ingest days after the cross-source check
-    # doubled the per-row cost, and the class balance ran to 86% positive.
-    # A separate deadline per class means a fire surge can no longer starve the
-    # negatives; at worst each class is truncated on its own.
-    per_class_budget = TIME_BUDGET_SECONDS / 2.0
-
-    for label, pts in ((1, fire_pts), (0, nofire_pts)):
+    for label, pts, budget in ((1, fire_pts, FIRE_BUDGET_SECONDS),
+                               (0, nofire_pts, CONTROL_BUDGET_SECONDS)):
         start = time.monotonic()
         for lat, lon, acq_date in pts:
-            if time.monotonic() - start > per_class_budget:
+            if time.monotonic() - start > budget:
                 truncated = True
                 break
             if not acq_date:
                 continue
             try:
-                feats = _features_for_date(lat, lon, acq_date, strict=True) if date else _features_for(lat, lon)
+                # Fires are today, so live features are the right ones. Controls
+                # are a year back and need every time-varying feature backdated.
+                # Live fires get live features; backfilled fires and controls are in
+                # the past, so every time-varying feature is backdated.
+                feats = (_features_for(lat, lon) if label and not date
+                         else _features_for_historical(lat, lon, acq_date))
             except Exception as e:
                 logger.warning("feature fetch failed @ %.3f,%.3f: %s", lat, lon, e)
                 continue
             row = {
                 "lat": round(lat, 5), "lon": round(lon, 5), "acq_date": acq_date,
                 **feats, "fire": label,
-                "source": "firms_viirs" if label else "sampled_nofire",
+                "source": "firms_viirs" if label else "matched_control",
             }
             # Data-quality gate: only clean rows are returned for appending.
             issue = _row_quality_issue(row)
