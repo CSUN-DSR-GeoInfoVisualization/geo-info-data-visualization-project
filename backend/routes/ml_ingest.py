@@ -134,7 +134,9 @@ def _weather_for_date(lat, lon, date_str):
     except (ValueError, TypeError):
         return None
     start = (t - _dt.timedelta(days=3)).strftime("%Y-%m-%d")
-    end = (t + _dt.timedelta(days=3)).strftime("%Y-%m-%d")
+    # The archive rejects any end_date after today, which failed the whole lookup
+    # for the last 3 days of dates; clamp to the newest day it holds.
+    end = min(t + _dt.timedelta(days=3), _dt.datetime.utcnow() - _dt.timedelta(days=1)).strftime("%Y-%m-%d")
     try:
         r = requests.get(_ARCHIVE_URL, params={
             "latitude": lat, "longitude": lon, "start_date": start, "end_date": end,
