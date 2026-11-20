@@ -220,4 +220,7 @@ jobs:
               -H "Content-Type: application/json" \
               -d "{\"subject\":\"FireScope: training data stalled ${AGE} days\",\"message\":\"california_daily.csv has not grown in ${AGE} days. The daily ingest/training loop may be silently failing — check the daily-retrain workflow run logs and the FIRMS /ingest endpoint.\"}" \
               "https://firescope-api.onrender.com/api/internal/ml/alert" || true
+            # Fail red so GitHub's own failure notification fires: the email above
+            # went out daily from 2026-11-08 while the run stayed green and unnoticed.
+            exit 1
           fi
