@@ -74,7 +74,9 @@ jobs:
         run: |
           NOW=$(date -u +%Y-%m-%dT%H:%M:%S)
           echo "now=$NOW" >> "$GITHUB_OUTPUT"
-          python -m ml.retrain_and_gate --now "$NOW" | tee /tmp/promote.log
+          # HOLD (2026-11-20): dry-run until the matched-set model is reviewed by hand.
+          # Remove --dry-run to re-enable weekly auto-promotion.
+          python -m ml.retrain_and_gate --dry-run --now "$NOW" | tee /tmp/promote.log
           # The model .pkl is rewritten ONLY on a promotion; a rejected gate
           # leaves it untouched. That diff is our promote/no-promote signal.
           if git diff --quiet -- ml/models/wildfire_model_predictive.pkl; then
