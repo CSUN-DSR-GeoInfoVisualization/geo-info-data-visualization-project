@@ -12,19 +12,20 @@ repo by the calling workflow (CSV append + commit). That keeps the growing
 training set in free storage with zero database cost-risk.
 """
 import os
+import re
 import json
 import time
 import random
 import logging
-from datetime import datetime
 
 import requests
+from datetime import datetime
 from flask import Blueprint, request, jsonify
 
 from data.features import get_feature
-from data.live_weather import get_weather
+from data.live_weather import get_weather_daily
 from data.weather_crosscheck import get_weather_second
-from ml.geo_checks import on_ca_land, in_any_perimeter
+from ml.geo_checks import on_ca_land, _county_features
 
 logger = logging.getLogger(__name__)
 ml_ingest_bp = Blueprint("ml_ingest", __name__)
@@ -45,13 +46,20 @@ CA_BBOX = (-124.0, 32.0, -114.0, 42.0)  # lon_min, lat_min, lon_max, lat_max
 # the point count low AND enforce a hard wall-clock budget below. The dataset
 # grows across daily runs, so a modest per-run count is fine.
 MAX_FIRE_PER_RUN = 15
-MAX_NOFIRE_PER_RUN = 15
 # Point-loop budget. Lowered from 55 because each run now also does pre-loop work
 # (active-perimeter load + a wider FIRMS avoidance fetch) and a per-point
 # cross-source weather call; keeping the loop at 35s leaves comfortable headroom
 # under the gunicorn worker timeout. The dataset grows across daily runs, so a
 # smaller per-run yield is fine.
-TIME_BUDGET_SECONDS = 35
+TIME_BUDGET_SECONDS = 60
+# Each class gets its OWN slice of the budget. Previously both shared one
+# deadline with fires processed first, so a busy fire day left nothing for the
+# negatives — they hit zero on 12 of 14 ingest days. Controls now get the larger
+# slice because they are the expensive class: a matched control needs archive
+# weather + a NASA POWER drought spinup + a GEE composite for its historical
+# date, roughly three times the work of a live fire row.
+FIRE_BUDGET_SECONDS = 20
+CONTROL_BUDGET_SECONDS = 40
 
 # Column order the workflow appends to california_daily.csv (must match the base
 # CSV header: the 6 features + label, plus provenance).
@@ -92,16 +100,20 @@ def _row_quality_issue(row):
 
 
 def _features_for(lat, lon):
-    wx = get_weather(lat, lon) or {}
+    """Today's features for a point, using the DAILY-AGGREGATE weather definition
+    the model is trained on (see data.live_weather.get_weather_daily).
+
+    Weather is fetched once and every field is read from that one response. An
+    ingest row must be all-or-nothing: mixing a live reading for one feature with
+    a defaulted or IDW-estimated value for another produces a row that looks clean
+    to the range gate but isn't a real observation. If the fetch fails the caller
+    drops the point rather than inventing a row."""
+    wx = get_weather_daily(lat, lon)
     return {
         "evi": float(get_feature(lat, lon, "evi")),
-        "air_temp_encoded": float(wx.get("air_temp_encoded", get_feature(lat, lon, "air_temp_encoded"))),
-        # get_weather returns the key "wind_speed" (not "wind"). The old default
-        # of 0.0 silently recorded wind=0 on every row, making the wind feature
-        # dead. Read the correct key; fall back to the IDW estimate only if the
-        # live fetch had no wind at all.
-        "wind": float(wx["wind_speed"]) if "wind_speed" in wx else float(get_feature(lat, lon, "wind")),
-        "humidity": float(wx.get("humidity", 50.0)),
+        "air_temp_encoded": (float(wx["temperature_celsius"]) + 273.15) / 0.02,
+        "wind": float(wx["wind_speed"]),
+        "humidity": float(wx["humidity"]),
         "elevation": float(get_feature(lat, lon, "elevation")),
         "kbdi": float(get_feature(lat, lon, "kbdi")),
     }
@@ -122,7 +134,9 @@ def _weather_for_date(lat, lon, date_str):
     except (ValueError, TypeError):
         return None
     start = (t - _dt.timedelta(days=3)).strftime("%Y-%m-%d")
-    end = (t + _dt.timedelta(days=3)).strftime("%Y-%m-%d")
+    # The archive rejects any end_date after today, which failed the whole lookup
+    # for the last 3 days of dates; clamp to the newest day it holds.
+    end = min(t + _dt.timedelta(days=3), _dt.datetime.utcnow() - _dt.timedelta(days=1)).strftime("%Y-%m-%d")
     try:
         r = requests.get(_ARCHIVE_URL, params={
             "latitude": lat, "longitude": lon, "start_date": start, "end_date": end,
@@ -146,14 +160,16 @@ def _weather_for_date(lat, lon, date_str):
         return None
 
 
-def _features_for_date(lat, lon, date_str, strict=False):
+def _features_for_date(lat, lon, date_str):
     """Like _features_for but with weather AT the given date (archive). Falls back
-    to current weather if the archive has no data for that date yet, unless
-    strict (backfill), where current weather would mislabel a past row."""
+    to current weather if the archive has no data for that date yet.
+
+    EVI and KBDI are the CURRENT values, which is acceptable only because the one
+    caller (the backtest) scores fires from the last few days, where "current" and
+    "at the fire" are the same composite and the same drought window. For dates
+    further back use _features_for_historical."""
     wx = _weather_for_date(lat, lon, date_str)
     if wx is None:
-        if strict:
-            raise ValueError(f"no archive weather for {date_str}")
         return _features_for(lat, lon)
     return {
         "evi": float(get_feature(lat, lon, "evi")),
@@ -162,6 +178,39 @@ def _features_for_date(lat, lon, date_str, strict=False):
         "humidity": wx["humidity"],
         "elevation": float(get_feature(lat, lon, "elevation")),
         "kbdi": float(get_feature(lat, lon, "kbdi")),
+    }
+
+
+def _prior_year(date_str):
+    """Same calendar date, one year earlier — the matched control's date."""
+    import datetime as _dt
+    t = _dt.datetime.strptime(date_str, "%Y-%m-%d")
+    try:
+        return t.replace(year=t.year - 1).strftime("%Y-%m-%d")
+    except ValueError:                      # 29 February
+        return t.replace(year=t.year - 1, day=28).strftime("%Y-%m-%d")
+
+
+def _features_for_historical(lat, lon, date_str):
+    """EVERY time-varying feature as it was on `date_str` — weather, vegetation
+    and drought. Used to build matched control rows a year back, where reusing
+    today's EVI or KBDI would pair last year's wind with this year's drought and
+    manufacture a row that never existed.
+
+    Elevation is static, so it is read normally. Raises if any historical fetch
+    fails; the caller drops the point rather than emitting a half-backdated row."""
+    wx = _weather_for_date(lat, lon, date_str)
+    if wx is None:
+        raise RuntimeError(f"no archive weather for {lat},{lon} on {date_str}")
+    from data.live_evi_gee import get_evi_at
+    from data.live_kbdi import get_kbdi_at
+    return {
+        "evi": float(get_evi_at(lat, lon, date_str)),
+        "air_temp_encoded": wx["air_temp_encoded"],
+        "wind": wx["wind"],
+        "humidity": wx["humidity"],
+        "elevation": float(get_feature(lat, lon, "elevation")),
+        "kbdi": float(get_kbdi_at(lat, lon, date_str)),
     }
 
 
@@ -194,9 +243,6 @@ def _weather_mismatch(row, second):
             return f"{name} disagree: primary={a:.1f} second={b:.1f} (>{tol})"
     return None
 
-
-def _far_from_fires(lat, lon, fires, min_deg=0.15):
-    return all((lat - flat) ** 2 + (lon - flon) ** 2 >= min_deg ** 2 for flat, flon, _ in fires)
 
 
 # Label-quality gate (Layer 2a): drop low-confidence FIRMS detections. VIIRS
@@ -249,25 +295,6 @@ def _fetch_firms(days, date=""):
     return out, low
 
 
-def _load_active_perimeters():
-    """Active NIFC fire perimeters for the no-fire label check. Prefer the cached
-    copy (already warmed by the website / daily prewarm); fall back to the live
-    compute. Fail-open to an empty set so a fetch problem never blocks ingest."""
-    try:
-        from services.cache import _load_from_db
-        entry = _load_from_db("fire_perimeters")
-        if entry and entry.get("data"):
-            data = entry["data"]
-            return json.loads(data) if isinstance(data, str) else data
-    except Exception as e:
-        logger.warning("perimeter cache read failed: %s", e)
-    try:
-        from routes.predict import _compute_nifc_perimeters
-        return _compute_nifc_perimeters()
-    except Exception as e:
-        logger.warning("perimeter live compute failed: %s", e)
-        return {"features": []}
-
 
 @ml_ingest_bp.route("/internal/ml/ingest", methods=["POST"])
 def ingest():
@@ -291,33 +318,41 @@ def ingest():
         logger.warning("FIRMS fetch failed: %s", e)
         return jsonify({"error": f"FIRMS fetch failed: {e}"}), 502
 
-    rng = random.Random(20260603)
-    fire_pts = fires[:MAX_FIRE_PER_RUN]
-    lon0, lat0, lon1, lat1 = CA_BBOX
     acq = fires[0][2] if fires else request.args.get("date", "")
 
-    # No-fire label verification (Layer 2 #1): a sampled "no-fire" point must be
-    # genuinely fire-free. We reject it if it is (a) near any fire in a WIDER
-    # window than today's (so a fire from 2-3 days ago, or one FIRMS caught
-    # adjacent, still excludes it), or (b) inside an active NIFC fire perimeter.
-    # Plus a CA-land mask (#2) so no-fire points are never ocean / out-of-state.
-    avoid_fires, _ = (_fetch_firms(max(days, 3), date) if FIRMS_MAP_KEY else ([], 0))
-    if not avoid_fires:
-        avoid_fires = fires
-    perimeters = _load_active_perimeters()
+    # Positives get the same geographic rule as negatives. FIRMS is queried by
+    # bounding box, and CA_BBOX is a rectangle that covers large parts of Nevada,
+    # Arizona and the Pacific — so half of the "California" detections were not in
+    # California, while no-fire points have been CA-land-masked since 2026-06-19.
+    # That taught the model an inverted geographic prior (off-CA => fire in the
+    # daily feed, off-CA => no-fire in the 2020 base). One rule, both classes.
+    fires_on_land = [f for f in fires if on_ca_land(f[0], f[1])]
+    fires_off_land = len(fires) - len(fires_on_land)
+    fire_pts = fires_on_land[:MAX_FIRE_PER_RUN]
 
-    nofire_pts, tries = [], 0
-    nofire_target = min(MAX_NOFIRE_PER_RUN, max(len(fire_pts), 10))
-    while len(nofire_pts) < nofire_target and tries < 8000:
-        tries += 1
-        la, lo = rng.uniform(lat0, lat1), rng.uniform(lon0, lon1)
-        if not on_ca_land(la, lo):
-            continue
-        if not _far_from_fires(la, lo, avoid_fires):
-            continue
-        if in_any_perimeter(la, lo, perimeters):
-            continue
-        nofire_pts.append((la, lo, acq))
+    # No-fire rows are MATCHED CONTROLS: the SAME point, one year earlier.
+    #
+    # They used to be uniform-random California points, which made the model
+    # compare WHERE fires happen against WHERE random points land. Measured over
+    # 1045 rows, that inverted three of the four physical priors — fire rows came
+    # out MORE humid (34.9% vs 25.3%), cooler and calmer than the negatives — and
+    # the monotonic constraint correctly refused to learn them, leaving humidity
+    # with exactly zero influence on the shipped model.
+    #
+    # A within-location paired test over 120 fire points showed the priors hold
+    # once terrain is fixed: at the SAME lat/lon a fire day is 32.7 points drier
+    # (98% of locations, p=3e-37), 15.3 C hotter (97%) and 0.47 m/s windier (73%)
+    # than a control day. Matching on location cancels terrain, vegetation type,
+    # elevation and regional climate, so what the model learns is weather and
+    # drought — which is what it is asked at inference time.
+    #
+    # Known limitation: without a FIRMS archive key we cannot confirm the pixel
+    # did not also burn on that date a year earlier. Reburn of the same 250 m
+    # pixel within a year is unlikely (the fuel is gone), but these are assumed
+    # negatives, not verified ones.
+    boundaries_ok = bool(_county_features())
+    nofire_pts = [(la, lo, _prior_year(a)) for la, lo, a in fire_pts]
+    nofire_target = len(nofire_pts)
 
     # Cross-check compares against CURRENT weather, so it is meaningless on backfill rows.
     crosscheck = CROSSCHECK_ENABLED and request.args.get("crosscheck", "1") != "0" and not date
@@ -325,24 +360,31 @@ def ingest():
     dropped = []
     cross_dropped = []
     cross_checked = 0
-    start = time.monotonic()
     truncated = False
-    for label, pts in ((1, fire_pts), (0, nofire_pts)):
+
+    for label, pts, budget in ((1, fire_pts, FIRE_BUDGET_SECONDS),
+                               (0, nofire_pts, CONTROL_BUDGET_SECONDS)):
+        start = time.monotonic()
         for lat, lon, acq_date in pts:
-            if time.monotonic() - start > TIME_BUDGET_SECONDS:
+            if time.monotonic() - start > budget:
                 truncated = True
                 break
             if not acq_date:
                 continue
             try:
-                feats = _features_for_date(lat, lon, acq_date, strict=True) if date else _features_for(lat, lon)
+                # Fires are today, so live features are the right ones. Controls
+                # are a year back and need every time-varying feature backdated.
+                # Live fires get live features; backfilled fires and controls are in
+                # the past, so every time-varying feature is backdated.
+                feats = (_features_for(lat, lon) if label and not date
+                         else _features_for_historical(lat, lon, acq_date))
             except Exception as e:
                 logger.warning("feature fetch failed @ %.3f,%.3f: %s", lat, lon, e)
                 continue
             row = {
                 "lat": round(lat, 5), "lon": round(lon, 5), "acq_date": acq_date,
                 **feats, "fire": label,
-                "source": "firms_viirs" if label else "sampled_nofire",
+                "source": "firms_viirs" if label else "matched_control",
             }
             # Data-quality gate: only clean rows are returned for appending.
             issue = _row_quality_issue(row)
@@ -362,8 +404,6 @@ def ingest():
                         cross_dropped.append({"lat": row["lat"], "lon": row["lon"], "reason": mm})
                         continue
             rows.append(row)
-        if truncated:
-            break
 
     # quality_ok is informational for the caller/alerting: false when nothing
     # clean came through, or when the majority of computed rows failed the gate
@@ -371,8 +411,15 @@ def ingest():
     computed = len(rows) + len(dropped)
     quality_ok = computed > 0 and len(dropped) <= computed * 0.5
 
+    # Per-class counts, so a collapsed no-fire class is visible in the response
+    # instead of only showing up months later as a class-imbalanced training set.
+    n_fire = sum(1 for r in rows if r["fire"] == 1)
     return jsonify({"ok": True, "fires_seen": len(fires),
+                    "fires_off_ca_land": fires_off_land,
                     "firms_lowconf_dropped": firms_lowconf, "count": len(rows),
+                    "fire_rows": n_fire, "nofire_rows": len(rows) - n_fire,
+                    "nofire_target": nofire_target, "nofire_sampled": len(nofire_pts),
+                    "boundaries_ok": boundaries_ok,
                     "dropped": len(dropped), "dropped_detail": dropped[:20],
                     "cross_source_checked": cross_checked,
                     "cross_source_dropped": len(cross_dropped),
@@ -707,6 +754,88 @@ def backtest():
         _id, _ = _send_alert_email("model backtest: low recall on recent fires", msg)
         emailed = _id is not None
     return jsonify({"ok": True, "healthy": healthy, "emailed": emailed, "report": report}), 200
+
+
+# Model staleness (#7): the failure that started this — the gate rejected six
+# consecutive retrains and the live model sat unchanged for eight weeks while the
+# weekly job reported success every Sunday. Nothing watched the one number that
+# mattered: how old the serving model is. A rejection is normal; a run of them,
+# or a model that has not moved in weeks, is a stuck pipeline.
+MODEL_MAX_AGE_DAYS = 21
+MAX_CONSECUTIVE_NON_PROMOTIONS = 3
+_MODEL_META = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           "ml", "models", "model_metadata.json")
+_RETRAIN_LOG = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "ml", "models", "RETRAIN_LOG.md")
+
+
+def _model_staleness():
+    """Age of the serving model and how many gate runs in a row failed to ship
+    one. Returns a JSON-able report; never raises."""
+    import datetime as _dt
+
+    trained_at, age_days = None, None
+    try:
+        with open(_MODEL_META) as f:
+            trained_at = str(json.load(f)["trained_at"])
+        t = _dt.datetime.strptime(trained_at[:10], "%Y-%m-%d")
+        age_days = (_dt.datetime.utcnow() - t).days
+    except Exception as e:
+        logger.warning("model metadata unreadable: %s", e)
+
+    streak, verdicts = 0, []
+    try:
+        with open(_RETRAIN_LOG) as f:
+            verdicts = re.findall(r"^## .+ — (PROMOTED|REJECTED|HELD)", f.read(), re.M)
+        for v in reversed(verdicts):
+            if v == "PROMOTED":
+                break
+            streak += 1
+    except Exception as e:
+        logger.warning("retrain log unreadable: %s", e)
+
+    too_old = age_days is not None and age_days > MODEL_MAX_AGE_DAYS
+    stuck = streak >= MAX_CONSECUTIVE_NON_PROMOTIONS
+    return {
+        "trained_at": trained_at,
+        "age_days": age_days,
+        "max_age_days": MODEL_MAX_AGE_DAYS,
+        "consecutive_non_promotions": streak,
+        "max_consecutive_non_promotions": MAX_CONSECUTIVE_NON_PROMOTIONS,
+        "gate_decisions": verdicts[-8:],
+        "model_too_old": too_old,
+        "gate_stuck": stuck,
+        "healthy": not (too_old or stuck),
+    }
+
+
+@ml_ingest_bp.route("/internal/ml/model-staleness", methods=["POST"])
+def model_staleness():
+    expected = os.getenv("INTERNAL_CRON_TOKEN", "")
+    if not expected:
+        return jsonify({"error": "INTERNAL_CRON_TOKEN not configured"}), 500
+    if request.headers.get("X-Internal-Token", "") != expected:
+        return jsonify({"error": "invalid X-Internal-Token"}), 401
+
+    report = _model_staleness()
+    emailed = False
+    if request.args.get("notify", "1") != "0" and not report["healthy"]:
+        bits = []
+        if report["model_too_old"]:
+            bits.append(f"The serving model is {report['age_days']} days old "
+                        f"(trained {report['trained_at']}); the threshold is "
+                        f"{MODEL_MAX_AGE_DAYS} days.")
+        if report["gate_stuck"]:
+            bits.append(f"The retrain gate has shipped nothing for "
+                        f"{report['consecutive_non_promotions']} runs in a row "
+                        f"({', '.join(report['gate_decisions'])}).")
+        bits.append("The weekly retrain is running but not replacing the model. "
+                    "Check the holdout size and the gate reasons in RETRAIN_LOG.md.")
+        _id, _ = _send_alert_email("model staleness: live model is not being replaced",
+                                   json.dumps(report, indent=2) + "\n\n" + " ".join(bits))
+        emailed = _id is not None
+    return jsonify({"ok": True, "healthy": report["healthy"],
+                    "emailed": emailed, "report": report}), 200
 
 
 # Feature audit (#6): cross-validate CACHED elevation against an independent DEM

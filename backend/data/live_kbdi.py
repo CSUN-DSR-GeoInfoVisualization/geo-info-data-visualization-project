@@ -174,3 +174,21 @@ def get_kbdi(lat: float, lon: float) -> float:
     series = _fetch_30day_weather(lat, lon)
     r      = _r_for(lat, lon)
     return float(kbdi_final(series, r_annual_in=r, initial_kbdi=100.0))
+
+
+def get_kbdi_at(lat: float, lon: float, date_str: str) -> float:
+    """KBDI as of a PAST date, from the 30 days of weather preceding it.
+
+    Needed so a matched control row (same point, earlier date) carries the
+    drought state of ITS date. Pairing a historical wind with today's KBDI would
+    produce a row that never existed — the same class of defect as the
+    instantaneous-vs-daily weather mismatch fixed on 2026-07-28.
+
+    Same spinup window and iteration as ml.enrich_kbdi, which is how the
+    committed training rows were built, so the values are comparable.
+    """
+    from ml.enrich_kbdi import fetch_spinup_window
+
+    series = fetch_spinup_window(lat, lon, date_str)
+    r = _r_for(lat, lon)
+    return float(kbdi_final(series, r_annual_in=r, initial_kbdi=100.0))

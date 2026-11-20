@@ -16,7 +16,7 @@ from flask_jwt_extended import jwt_required, get_jwt
 
 from ml.inference import predict_from_features, predict_batch_features
 from data.sample_locations import SAMPLE_LOCATIONS
-from data.live_weather import get_weather
+from data.live_weather import get_weather_daily
 from data.features import get_feature
 from models import db, ZoneRiskCache
 
@@ -499,9 +499,10 @@ _WEATHER_WORKERS = 16
 
 
 def _fetch_live_weather(lat: float, lon: float) -> dict | None:
-    """Fetch live wind, humidity, and air_temp_encoded from Open-Meteo. Returns None on failure."""
+    """Fetch today's wind, humidity, and air_temp_encoded from Open-Meteo as daily
+    aggregates — the definition the model was trained on. Returns None on failure."""
     try:
-        w = get_weather(lat, lon)
+        w = get_weather_daily(lat, lon)
         return {
             "wind":             w["wind_speed"],
             "humidity":         w["humidity"],

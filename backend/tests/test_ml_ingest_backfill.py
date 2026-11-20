@@ -20,6 +20,27 @@ def test_fetch_firms_appends_backfill_date(monkeypatch):
 
 
 def test_backfill_features_never_fall_back_to_current_weather(monkeypatch):
+    # Backfilled fire rows use _features_for_historical, which must raise, not
+    # silently substitute today's weather, when the archive has no data.
     monkeypatch.setattr(ml_ingest, "_weather_for_date", lambda *a: None)
-    with pytest.raises(ValueError):
-        ml_ingest._features_for_date(37.8, -122.3, "2026-11-06", strict=True)
+    with pytest.raises(RuntimeError):
+        ml_ingest._features_for_historical(37.8, -122.3, "2026-11-06")
+
+
+def test_archive_window_never_requests_future_dates(monkeypatch):
+    # Open-Meteo's archive rejects end_date > today, which used to fail the whole
+    # lookup for any date in the last 3 days.
+    import datetime as dt
+    seen = {}
+
+    class R:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"daily": {}}
+
+    monkeypatch.setattr(ml_ingest.requests, "get", lambda url, params, timeout: seen.update(params) or R())
+    today = dt.datetime.utcnow().strftime("%Y-%m-%d")
+    ml_ingest._weather_for_date(37.8, -122.3, today)
+    assert seen["end_date"] < today

@@ -42,6 +42,7 @@ migrations/versions/__pycache__/
 backend/ml/training_data/*
 !backend/ml/training_data/california_2020_kbdi.csv
 !backend/ml/training_data/california_daily.csv
+!backend/ml/training_data/california_matched.csv
 backend/ml/charts/
 backend/ml/models/*_backup_*.pkl
 backend/ml/.appeears_task_id

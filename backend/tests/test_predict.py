@@ -26,7 +26,7 @@ def test_predict_invalid_lat_lon_type(client):
 
 
 def test_predict_valid_returns_expected_shape(client):
-    with patch('routes.predict.get_weather', return_value={'wind_speed': 5.0, 'temperature_celsius': 30.0, 'humidity': 40.0}), \
+    with patch('routes.predict.get_weather_daily', return_value={'wind_speed': 5.0, 'temperature_celsius': 30.0, 'humidity': 40.0}), \
          patch('routes.predict.get_elevation', return_value=200.0), \
          patch('routes.predict.get_evi', return_value=0.3):
 
@@ -43,18 +43,24 @@ def test_predict_valid_returns_expected_shape(client):
 
 
 def test_predict_risk_level_is_valid_label(client):
-    with patch('routes.predict.get_weather', return_value={'wind_speed': 5.0, 'temperature_celsius': 30.0, 'humidity': 40.0}), \
+    with patch('routes.predict.get_weather_daily', return_value={'wind_speed': 5.0, 'temperature_celsius': 30.0, 'humidity': 40.0}), \
          patch('routes.predict.get_elevation', return_value=200.0), \
          patch('routes.predict.get_evi', return_value=0.3):
 
         resp = client.post('/api/predict', json={'lat': 34.05, 'lon': -118.25})
 
     data = resp.get_json()
-    assert data['prediction']['risk_level'] in ('Low', 'Medium', 'High', 'Extreme')
+    # The canonical 5-tier scale is defined in ml/inference.py risk_label:
+    # Low / Moderate / High / Very High / Extreme. This assertion previously read
+    # ('Low', 'Medium', 'High', 'Extreme') — "Medium" is not a tier at all, and
+    # "Moderate" and "Very High" were missing, so it passed only because the model
+    # of the day happened to land on one of the four listed labels.
+    assert data['prediction']['risk_level'] in (
+        'Low', 'Moderate', 'High', 'Very High', 'Extreme')
 
 
 def test_predict_risk_probability_in_range(client):
-    with patch('routes.predict.get_weather', return_value={'wind_speed': 5.0, 'temperature_celsius': 30.0, 'humidity': 40.0}), \
+    with patch('routes.predict.get_weather_daily', return_value={'wind_speed': 5.0, 'temperature_celsius': 30.0, 'humidity': 40.0}), \
          patch('routes.predict.get_elevation', return_value=200.0), \
          patch('routes.predict.get_evi', return_value=0.3):
 
@@ -66,7 +72,7 @@ def test_predict_risk_probability_in_range(client):
 
 
 def test_predict_falls_back_when_live_data_fails(client):
-    with patch('routes.predict.get_weather', side_effect=Exception('timeout')), \
+    with patch('routes.predict.get_weather_daily', side_effect=Exception('timeout')), \
          patch('routes.predict.get_elevation', side_effect=Exception('timeout')), \
          patch('routes.predict.get_evi', side_effect=Exception('timeout')):
 
@@ -80,7 +86,7 @@ def test_predict_falls_back_when_live_data_fails(client):
 
 
 def test_predict_live_sources_reported(client):
-    with patch('routes.predict.get_weather', return_value={'wind_speed': 3.0, 'temperature_celsius': 25.0, 'humidity': 40.0}), \
+    with patch('routes.predict.get_weather_daily', return_value={'wind_speed': 3.0, 'temperature_celsius': 25.0, 'humidity': 40.0}), \
          patch('routes.predict.get_elevation', return_value=100.0), \
          patch('routes.predict.get_evi', return_value=0.2):
 
@@ -93,7 +99,7 @@ def test_predict_live_sources_reported(client):
 
 
 def test_predict_location_echoes_request(client):
-    with patch('routes.predict.get_weather', return_value={'wind_speed': 5.0, 'temperature_celsius': 30.0, 'humidity': 40.0}), \
+    with patch('routes.predict.get_weather_daily', return_value={'wind_speed': 5.0, 'temperature_celsius': 30.0, 'humidity': 40.0}), \
          patch('routes.predict.get_elevation', return_value=200.0), \
          patch('routes.predict.get_evi', return_value=0.3):
 
@@ -132,7 +138,7 @@ def test_predict_batch_item_invalid_types(client):
 
 
 def test_predict_batch_valid_returns_results_list(client):
-    with patch('routes.predict.get_weather', return_value={'wind_speed': 5.0, 'temperature_celsius': 30.0, 'humidity': 40.0}), \
+    with patch('routes.predict.get_weather_daily', return_value={'wind_speed': 5.0, 'temperature_celsius': 30.0, 'humidity': 40.0}), \
          patch('routes.predict.get_elevation', return_value=200.0), \
          patch('routes.predict.get_evi', return_value=0.3):
 
@@ -150,7 +156,7 @@ def test_predict_batch_valid_returns_results_list(client):
 
 
 def test_predict_batch_each_result_has_prediction(client):
-    with patch('routes.predict.get_weather', return_value={'wind_speed': 5.0, 'temperature_celsius': 30.0, 'humidity': 40.0}), \
+    with patch('routes.predict.get_weather_daily', return_value={'wind_speed': 5.0, 'temperature_celsius': 30.0, 'humidity': 40.0}), \
          patch('routes.predict.get_elevation', return_value=200.0), \
          patch('routes.predict.get_evi', return_value=0.3):
 

@@ -50,6 +50,16 @@ jobs:
           curl -s -X POST --max-time 120 -H "X-Internal-Token: $TOKEN" \
             "https://firescope-api.onrender.com/api/internal/ml/backtest?days=3" || true
 
+      - name: Model staleness — is the gate actually shipping anything? (#7)
+        env:
+          TOKEN: ${{ secrets.INTERNAL_CRON_TOKEN }}
+        run: |
+          # Emails only if the serving model has gone stale or the gate has
+          # rejected/held N runs in a row. This runs BEFORE the gate below so it
+          # reports the state the week actually ran with. Non-blocking.
+          curl -s -X POST --max-time 60 -H "X-Internal-Token: $TOKEN" \
+            https://firescope-api.onrender.com/api/internal/ml/model-staleness || true
+
       - name: Feature audit — cached elevation vs independent DEM (#6)
         env:
           TOKEN: ${{ secrets.INTERNAL_CRON_TOKEN }}
@@ -64,7 +74,9 @@ jobs:
         run: |
           NOW=$(date -u +%Y-%m-%dT%H:%M:%S)
           echo "now=$NOW" >> "$GITHUB_OUTPUT"
-          python -m ml.retrain_and_gate --now "$NOW" | tee /tmp/promote.log
+          # HOLD (2026-11-20): dry-run until the matched-set model is reviewed by hand.
+          # Remove --dry-run to re-enable weekly auto-promotion.
+          python -m ml.retrain_and_gate --dry-run --now "$NOW" | tee /tmp/promote.log
           # The model .pkl is rewritten ONLY on a promotion; a rejected gate
           # leaves it untouched. That diff is our promote/no-promote signal.
           if git diff --quiet -- ml/models/wildfire_model_predictive.pkl; then

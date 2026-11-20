@@ -9,7 +9,7 @@ from data.sample_locations import SAMPLE_LOCATIONS
 
 logger = logging.getLogger(__name__)
 
-from data.live_weather import get_weather
+from data.live_weather import get_weather_daily
 from data.live_elevation import get_elevation
 from data.live_evi import get_evi
 from data.live_kbdi import get_kbdi
@@ -69,7 +69,7 @@ def _run(lat: float, lon: float) -> dict:
     # Fire weather + elevation + EVI in PARALLEL instead of sequential.
     # Was: 3 sequential HTTP calls = ~1.5-4s. Now: bounded by the slowest = ~1s.
     with ThreadPoolExecutor(max_workers=3) as ex:
-        f_weather = ex.submit(get_weather, lat, lon)
+        f_weather = ex.submit(get_weather_daily, lat, lon)
         f_elev    = ex.submit(get_elevation, lat, lon)
         f_evi     = ex.submit(get_evi, lat, lon)
 

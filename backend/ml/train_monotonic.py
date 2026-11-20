@@ -108,3 +108,25 @@ def validate_monotonicity(model, scaler, n=25, tol=1e-6):
 def gate_passes(report):
     """True iff every constrained feature respects its physical direction."""
     return all(v["ok"] for v in report.values())
+
+
+# A constrained feature whose risk range over the swept interval is below this
+# is not being used at all. Direction alone cannot catch that: a perfectly flat
+# response satisfies both "non-decreasing" and "non-increasing", so a dead
+# feature passes the physics gate silently. Measured 2026-07-28: humidity had
+# range 0.0085 in the shipped model and exactly 0.0 in the candidate, i.e. the
+# model ignored atmospheric moisture entirely while the gate reported OK.
+MIN_EFFECT = 0.01
+
+
+def dead_constrained_features(report, min_effect=MIN_EFFECT):
+    """Constrained features the model has effectively flattened to nothing.
+
+    Reported rather than hard-gated: a dead feature usually means the DATA has
+    no usable signal in the physically-correct direction (for humidity it was
+    an inverted correlation caused by the negative-sampling design), and
+    blocking promotion would keep a worse model in production without fixing
+    the cause. The caller surfaces this so it cannot pass unnoticed.
+    """
+    return [name for name, v in report.items()
+            if v["range"] is not None and v["range"] < min_effect]
