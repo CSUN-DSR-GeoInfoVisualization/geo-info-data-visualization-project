@@ -219,7 +219,8 @@ def _fetch_firms(days):
     if not FIRMS_MAP_KEY:
         return [], 0
     lon0, lat0, lon1, lat1 = CA_BBOX
-    url = f"{FIRMS_BASE}/{FIRMS_MAP_KEY}/VIIRS_SNPP_NRT/{lon0},{lat0},{lon1},{lat1}/{days}"
+    # NOAA-20, not S-NPP: SNPP NRT went empty ~2026-11-06 and silently zeroed the ingest.
+    url = f"{FIRMS_BASE}/{FIRMS_MAP_KEY}/VIIRS_NOAA20_NRT/{lon0},{lat0},{lon1},{lat1}/{days}"
     r = requests.get(url, timeout=30)
     r.raise_for_status()
     lines = r.text.strip().split("\n")
