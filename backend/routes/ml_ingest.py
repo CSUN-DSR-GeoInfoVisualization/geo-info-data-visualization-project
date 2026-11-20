@@ -16,6 +16,7 @@ import json
 import time
 import random
 import logging
+from datetime import datetime
 
 import requests
 from flask import Blueprint, request, jsonify
@@ -145,11 +146,14 @@ def _weather_for_date(lat, lon, date_str):
         return None
 
 
-def _features_for_date(lat, lon, date_str):
+def _features_for_date(lat, lon, date_str, strict=False):
     """Like _features_for but with weather AT the given date (archive). Falls back
-    to current weather if the archive has no data for that date yet."""
+    to current weather if the archive has no data for that date yet, unless
+    strict (backfill), where current weather would mislabel a past row."""
     wx = _weather_for_date(lat, lon, date_str)
     if wx is None:
+        if strict:
+            raise ValueError(f"no archive weather for {date_str}")
         return _features_for(lat, lon)
     return {
         "evi": float(get_feature(lat, lon, "evi")),
@@ -213,14 +217,14 @@ def _is_low_confidence(val: str) -> bool:
         return False
 
 
-def _fetch_firms(days):
+def _fetch_firms(days, date=""):
     """Returns (kept_detections, n_low_confidence_dropped). kept = list of
     (lat, lon, acq_date) for nominal/high-confidence fire pixels only."""
     if not FIRMS_MAP_KEY:
         return [], 0
     lon0, lat0, lon1, lat1 = CA_BBOX
     # NOAA-20, not S-NPP: SNPP NRT went empty ~2026-11-06 and silently zeroed the ingest.
-    url = f"{FIRMS_BASE}/{FIRMS_MAP_KEY}/VIIRS_NOAA20_NRT/{lon0},{lat0},{lon1},{lat1}/{days}"
+    url = f"{FIRMS_BASE}/{FIRMS_MAP_KEY}/VIIRS_NOAA20_NRT/{lon0},{lat0},{lon1},{lat1}/{days}" + (f"/{date}" if date else "")
     r = requests.get(url, timeout=30)
     r.raise_for_status()
     lines = r.text.strip().split("\n")
@@ -274,8 +278,15 @@ def ingest():
         return jsonify({"error": "invalid X-Internal-Token"}), 401
 
     days = int(request.args.get("days", 1))
+    # Optional backfill start date (YYYY-MM-DD): FIRMS window becomes [date, date+days).
+    date = request.args.get("date", "")
+    if date:
+        try:
+            datetime.strptime(date, "%Y-%m-%d")
+        except ValueError:
+            return jsonify({"error": "date must be YYYY-MM-DD"}), 400
     try:
-        fires, firms_lowconf = _fetch_firms(days)
+        fires, firms_lowconf = _fetch_firms(days, date)
     except Exception as e:
         logger.warning("FIRMS fetch failed: %s", e)
         return jsonify({"error": f"FIRMS fetch failed: {e}"}), 502
@@ -290,7 +301,7 @@ def ingest():
     # window than today's (so a fire from 2-3 days ago, or one FIRMS caught
     # adjacent, still excludes it), or (b) inside an active NIFC fire perimeter.
     # Plus a CA-land mask (#2) so no-fire points are never ocean / out-of-state.
-    avoid_fires, _ = (_fetch_firms(max(days, 3)) if FIRMS_MAP_KEY else ([], 0))
+    avoid_fires, _ = (_fetch_firms(max(days, 3), date) if FIRMS_MAP_KEY else ([], 0))
     if not avoid_fires:
         avoid_fires = fires
     perimeters = _load_active_perimeters()
@@ -308,7 +319,8 @@ def ingest():
             continue
         nofire_pts.append((la, lo, acq))
 
-    crosscheck = CROSSCHECK_ENABLED and request.args.get("crosscheck", "1") != "0"
+    # Cross-check compares against CURRENT weather, so it is meaningless on backfill rows.
+    crosscheck = CROSSCHECK_ENABLED and request.args.get("crosscheck", "1") != "0" and not date
     rows = []
     dropped = []
     cross_dropped = []
@@ -323,7 +335,7 @@ def ingest():
             if not acq_date:
                 continue
             try:
-                feats = _features_for(lat, lon)
+                feats = _features_for_date(lat, lon, acq_date, strict=True) if date else _features_for(lat, lon)
             except Exception as e:
                 logger.warning("feature fetch failed @ %.3f,%.3f: %s", lat, lon, e)
                 continue

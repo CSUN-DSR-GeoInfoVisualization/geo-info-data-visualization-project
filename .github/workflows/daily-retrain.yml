@@ -30,6 +30,10 @@ on:
         description: 'FIRMS look-back window in days (default 2; raise for a one-time backfill)'
         type: string
         default: '2'
+      date:
+        description: 'Backfill start date YYYY-MM-DD (window = [date, date+days), max 5 days; uses archived weather)'
+        type: string
+        default: ''
 
 permissions:
   contents: write
@@ -56,11 +60,13 @@ jobs:
           # Scheduled runs use a 2-day window (previous UTC day is always posted
           # by 08:00 UTC). A manual run may pass a larger window to backfill gaps.
           INGEST_DAYS: ${{ github.event_name == 'workflow_dispatch' && inputs.days || '2' }}
+          INGEST_DATE: ${{ github.event_name == 'workflow_dispatch' && inputs.date || '' }}
         run: |
           python - <<'PY'
           import os, csv, json, urllib.request
           token = os.environ["INGEST_TOKEN"]
           days = os.environ.get("INGEST_DAYS", "2")
+          date_q = f"&date={os.environ['INGEST_DATE']}" if os.environ.get("INGEST_DATE") else ""
           base = "https://firescope-api.onrender.com/api/internal/ml"
 
           def post(path, body=None):
@@ -83,7 +89,7 @@ jobs:
           data, rows, cols = None, [], []
           for d in windows:
               try:
-                  data = post(f"/ingest?days={d}")
+                  data = post(f"/ingest?days={d}{date_q}")
               except Exception as e:
                   print(f"ingest days={d} failed: {e}")
                   continue
