@@ -58,7 +58,7 @@ jobs:
           urls=(
             "$API_BASE/fire-perimeters"
             "$API_BASE/evacuation-zones"
-            "$API_BASE/shelters"
+            # shelters removed: Cal OES CA_Shelter_system layer is gone (500 since ~Sept 2026); re-add once a replacement source lands
             "$API_BASE/news"
             "$API_BASE/calfire/incidents?inactive=false"
             "$API_BASE/history/perimeters/years"
