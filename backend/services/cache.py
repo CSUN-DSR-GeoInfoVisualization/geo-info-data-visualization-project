@@ -308,7 +308,11 @@ def warm_from_db_on_boot() -> int:
     """Hydrate in-memory cache from Postgres at app startup. Returns row count."""
     try:
         from models import EndpointCache
-        rows = EndpointCache.query.all()
+        # Skip the per-year fire-history blobs (several MB each, rarely viewed): they
+        # load one row at a time on first request (tier 1). Reading every row at
+        # boot, with old + new instances overlapping during a deploy, OOM-killed the
+        # 256 MB database 11 times (2026-11-20, 2026-11-25).
+        rows = EndpointCache.query.filter(~EndpointCache.cache_key.startswith('history_')).all()
         now = _time.time()
         for row in rows:
             body = bytes(row.body)
