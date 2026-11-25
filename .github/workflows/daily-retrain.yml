@@ -105,6 +105,17 @@ jobs:
           print(f"fires_seen={data.get('fires_seen')} new_rows={len(rows)} "
                 f"dropped={data.get('dropped')} cross_dropped={data.get('cross_source_dropped')} "
                 f"lowconf={data.get('firms_lowconf_dropped')} quality_ok={data.get('quality_ok')}")
+          print(f"fire_rows={data.get('fire_rows')} nofire_rows={data.get('nofire_rows')} "
+                f"fetch_failed={data.get('fetch_failed')} single_source_weather={data.get('single_source_weather')} "
+                f"truncated={data.get('truncated')}")
+          for f in data.get("fetch_failed_detail") or []:
+              print(f"  fetch failed fire={f['fire']} @ {f['lat']},{f['lon']}: {f['reason']}")
+          # A run with rows but only one class silently unbalances the training set.
+          if rows and (not data.get("fire_rows") or not data.get("nofire_rows")):
+              print("::warning::ingest returned only one class")
+              alert("daily ingest: only one class returned",
+                    json.dumps({k: data.get(k) for k in ("fire_rows", "nofire_rows", "fetch_failed",
+                                "fetch_failed_detail")}, indent=2))
 
           # #4 Quarantine: keep a record of every dropped row + reason for review.
           if dropped:

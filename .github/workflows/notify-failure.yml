@@ -1,0 +1,69 @@
+name: Email on workflow failure
+
+# Any run of the workflows below that does not succeed emails the owner with the
+# failed jobs/steps and the tail of the failed log, via the backend's alert
+# endpoint. If the backend is what's down, it sends through Resend directly when a
+# RESEND_API_KEY repo secret exists; otherwise GitHub's own failure email applies.
+on:
+  workflow_run:
+    workflows:
+      - "Alerts — Wildfires in your county"
+      - "Alerts — Evacuation"
+      - "Alerts — High-Risk Sweep"
+      - "Alerts — Breaking News"
+      - "Weekly model auto-promote"
+      - "Sync domain-deployment to main"
+      - "One-time history backfill"
+      - "Daily zone-risk pre-warm"
+      - "Daily training ingest + gated retrain"
+      - "Restart Render after backend deploy"
+    types: [completed]
+
+permissions:
+  actions: read
+
+jobs:
+  email:
+    if: github.event.workflow_run.conclusion != 'success' && github.event.workflow_run.conclusion != 'skipped'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Email failure details
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          INTERNAL_CRON_TOKEN: ${{ secrets.INTERNAL_CRON_TOKEN }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          WF: ${{ github.event.workflow_run.name }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+        run: |
+          failed=$(gh api "repos/${{ github.repository }}/actions/runs/$RUN_ID/jobs" \
+            -q '.jobs[] | select(.conclusion != "success" and .conclusion != "skipped") | "job: \(.name) (\(.conclusion))\n" + ([.steps[] | select(.conclusion == "failure") | "  failed step: \(.name)"] | join("\n"))')
+          tail_log=$(gh run view "$RUN_ID" -R "${{ github.repository }}" --log-failed 2>/dev/null | cut -f3- | tail -40)
+          # Passed via env, not interpolated, so log text can't break the script.
+          FAILED="$failed" TAIL="$tail_log" python3 - <<'PY'
+          import json, os, urllib.request
+          text = (f"Workflow: {os.environ['WF']}\nConclusion: {os.environ['CONCLUSION']}\n"
+                  f"Run: {os.environ['RUN_URL']}\n\n{os.environ['FAILED']}\n\n"
+                  f"Last lines of the failed log:\n{os.environ['TAIL']}")
+          subject = f"workflow failed: {os.environ['WF']} ({os.environ['CONCLUSION']})"
+          def send(url, payload, headers):
+              req = urllib.request.Request(url, data=json.dumps(payload).encode(), method="POST",
+                                           headers={"Content-Type": "application/json", **headers})
+              print(urllib.request.urlopen(req, timeout=90).read().decode())
+          try:
+              send("https://firescope-api.onrender.com/api/internal/ml/alert",
+                   {"subject": subject, "message": text},
+                   {"X-Internal-Token": os.environ["INTERNAL_CRON_TOKEN"]})
+          except Exception as e:
+              print("backend alert failed:", e)
+              if not os.environ.get("RESEND_API_KEY"):
+                  raise
+              send("https://api.resend.com/emails",
+                   {"from": "FireScope Alerts <alerts@firescope.dev>", "to": ["ido.the.cohen@gmail.com"],
+                    "subject": ("FireScope: " + subject)[:120], "text": text},
+                   {"Authorization": f"Bearer {os.environ['RESEND_API_KEY']}"})
+          PY
+      - name: Fallback if the email itself failed
+        if: failure()
+        run: echo "::error::failure email could not be sent; GitHub's own failure notification still applies" && exit 1

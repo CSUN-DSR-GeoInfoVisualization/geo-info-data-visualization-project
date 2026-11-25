@@ -163,6 +163,10 @@ def create_app(config_class=Config):
     def health():
         return jsonify({'status': 'ok'})
 
+    # Every logged failure/fallback is emailed to the owner as an hourly digest.
+    from services.failure_digest import install as install_failure_digest
+    install_failure_digest()
+
     return app
 
 if __name__ == '__main__':

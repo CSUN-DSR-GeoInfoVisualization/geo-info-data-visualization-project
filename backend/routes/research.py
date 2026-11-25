@@ -17,7 +17,7 @@ from flask_jwt_extended import jwt_required, get_jwt
 from ml.inference import predict_from_features, predict_batch_features
 from data.sample_locations import SAMPLE_LOCATIONS
 from data.live_weather import get_weather_daily
-from data.features import get_feature
+from data.features import get_feature, _idw
 from models import db, ZoneRiskCache
 
 research_bp = Blueprint('research', __name__)
@@ -352,9 +352,12 @@ def _compute_zone_risk(zone_type: str) -> dict | None:
             wind             = wx["wind"]
             humidity         = wx["humidity"]
         else:
-            air_temp_encoded = get_feature(lat, lon, "air_temp_encoded")
-            wind             = get_feature(lat, lon, "wind")
-            humidity         = get_feature(lat, lon, "humidity")
+            # Batch weather already failed (usually a 429 on the shared Render IP).
+            # Interpolate directly: three more get_feature calls x 3 retries each
+            # per zone burned the Open-Meteo quota for every other caller.
+            air_temp_encoded = _idw(lat, lon, "air_temp_encoded")
+            wind             = _idw(lat, lon, "wind")
+            humidity         = _idw(lat, lon, "humidity")
         # 'live' means all 3 static + weather came from real sources.
         # 'default' means the parallel feature future didn't finish OR weather fell back.
         sampled_quality.append("live" if (sf_present and wx) else "default")

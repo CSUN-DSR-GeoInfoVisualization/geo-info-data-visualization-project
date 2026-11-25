@@ -22,10 +22,14 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 
+import logging
+
 import requests
 
 from ml.kbdi import kbdi_final, c_to_f, mm_to_in
 from ml.build_r_cache import fetch_30yr_precip_inches, _key as r_key
+
+logger = logging.getLogger(__name__)
 
 
 _R_CACHE_PATH = os.path.join(
@@ -189,6 +193,31 @@ def get_kbdi_at(lat: float, lon: float, date_str: str) -> float:
     """
     from ml.enrich_kbdi import fetch_spinup_window
 
-    series = fetch_spinup_window(lat, lon, date_str)
+    try:
+        series = fetch_spinup_window(lat, lon, date_str)        # NASA POWER
+    except Exception as e:
+        logger.warning("POWER spinup failed @ %.3f,%.3f, using Open-Meteo archive: %s", lat, lon, e)
+        series = _spinup_open_meteo(lat, lon, date_str)
     r = _r_for(lat, lon)
     return float(kbdi_final(series, r_annual_in=r, initial_kbdi=100.0))
+
+
+def _spinup_open_meteo(lat: float, lon: float, date_str: str) -> list[tuple[float, float]]:
+    """Backup for ml.enrich_kbdi.fetch_spinup_window: the same 30-day window and the
+    same inputs (daily max temperature, daily precipitation) from Open-Meteo's
+    archive, returned in the same (T_max_F, precip_in) form."""
+    from ml.enrich_kbdi import SPINUP_DAYS
+    end = datetime.strptime(date_str, "%Y-%m-%d")
+    r = requests.get("https://archive-api.open-meteo.com/v1/archive", params={
+        "latitude": lat, "longitude": lon, "timezone": "America/Los_Angeles",
+        "start_date": (end - timedelta(days=SPINUP_DAYS - 1)).strftime("%Y-%m-%d"),
+        "end_date": end.strftime("%Y-%m-%d"),
+        "daily": "temperature_2m_max,precipitation_sum",
+    }, timeout=20)
+    r.raise_for_status()
+    d = r.json()["daily"]
+    series = [(c_to_f(t), mm_to_in(p)) for t, p in zip(d["temperature_2m_max"], d["precipitation_sum"])
+              if t is not None and p is not None]
+    if len(series) < SPINUP_DAYS // 2:
+        raise ValueError(f"too few valid Open-Meteo days ({len(series)})")
+    return series
