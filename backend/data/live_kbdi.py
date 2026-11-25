@@ -199,8 +199,11 @@ def get_kbdi_at(lat: float, lon: float, date_str: str) -> float:
     """
     from ml.enrich_kbdi import fetch_spinup_window
 
+    from data.open_meteo import RateLimited
     try:
         series = fetch_spinup_window(lat, lon, date_str)        # NASA POWER
+    except RateLimited:
+        raise  # throttled, not down: the backup would change the measurement
     except Exception as e:
         logger.warning("POWER spinup failed @ %.3f,%.3f, using Open-Meteo archive: %s", lat, lon, e)
         series = _spinup_open_meteo(lat, lon, date_str)

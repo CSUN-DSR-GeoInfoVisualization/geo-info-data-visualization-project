@@ -68,28 +68,17 @@ def fetch_spinup_window(lat: float, lon: float, acq_date: str) -> list[tuple[flo
     end   = datetime.strptime(acq_date, "%Y-%m-%d")
     start = end - timedelta(days=SPINUP_DAYS - 1)
 
-    params = {
-        "parameters": "T2M_MAX,PRECTOTCORR",
-        "community":  "AG",
-        "latitude":   lat,
-        "longitude":  lon,
-        "start":      start.strftime("%Y%m%d"),
-        "end":        end.strftime("%Y%m%d"),
-        "format":     "JSON",
-    }
+    from data import nasa_power
+    from data.open_meteo import RateLimited
+    lo, hi = start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
 
     last_err: Exception | None = None
     for attempt in range(4):
         try:
-            resp = requests.get(POWER_URL, params=params, timeout=30)
-            if resp.status_code == 429:
-                time.sleep(5 * (attempt + 1))
-                continue
-            resp.raise_for_status()
-            payload = resp.json() or {}
-            param   = payload.get("properties", {}).get("parameter", {})
-            tmax_d  = param.get("T2M_MAX")     or {}
-            prec_d  = param.get("PRECTOTCORR") or {}
+            # shared request with the weather window; keep only the spin-up days
+            param   = nasa_power.window(lat, lon, acq_date)
+            tmax_d  = {d: v for d, v in (param.get("T2M_MAX") or {}).items() if lo <= d <= hi}
+            prec_d  = {d: v for d, v in (param.get("PRECTOTCORR") or {}).items() if lo <= d <= hi}
             if not tmax_d or not prec_d:
                 raise ValueError("incomplete POWER payload")
 
@@ -108,6 +97,8 @@ def fetch_spinup_window(lat: float, lon: float, acq_date: str) -> list[tuple[flo
                 raise ValueError(f"too few valid days ({len(series)})")
             return series
 
+        except RateLimited:
+            raise  # a throttle is not an outage: never fall back to another source for it
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
             last_err = e
             time.sleep(3 * (attempt + 1))
