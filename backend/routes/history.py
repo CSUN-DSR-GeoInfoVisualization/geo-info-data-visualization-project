@@ -260,6 +260,9 @@ def backfill_history_years():
 
     Returns: {wrote, skipped, failed, total, elapsed_s, years_done}
     """
+    import hmac, os
+    if not hmac.compare_digest(request.headers.get('X-Internal-Token', ''), os.getenv('INTERNAL_CRON_TOKEN') or '\0'):
+        return jsonify({'error': 'invalid X-Internal-Token'}), 401
     import time as _time
     from sqlalchemy import select
     from models import db, EndpointCache

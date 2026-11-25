@@ -35,10 +35,11 @@ jobs:
         continue-on-error: true   # tile prewarm is best-effort; zone prewarm is the critical path
         env:
           API_BASE: https://firescope-api.onrender.com/api
+          INTERNAL_CRON_TOKEN: ${{ secrets.INTERNAL_CRON_TOKEN }}
         run: |
           echo "Triggering tile-cache backfill..."
           start=$(date +%s)
-          http=$(curl -s -X POST -o /tmp/tiles.json -w '%{http_code}' --max-time 85 "$API_BASE/research/admin/prewarm-tiles")
+          http=$(curl -s -X POST -H "X-Internal-Token: $INTERNAL_CRON_TOKEN" -o /tmp/tiles.json -w '%{http_code}' --max-time 85 "$API_BASE/research/admin/prewarm-tiles")
           echo "tile prewarm: HTTP=$http elapsed=$(($(date +%s) - start))s"
           cat /tmp/tiles.json || true
           if [ "$http" != "200" ]; then
