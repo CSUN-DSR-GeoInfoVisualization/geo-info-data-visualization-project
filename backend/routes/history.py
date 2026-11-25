@@ -20,10 +20,12 @@ Planned option 3 — in-house ML training snapshots (future work):
     random non-fire control points (fire=0), and retrains the scikit-learn
     model with the expanded feature set (adds TA and NDVI).
 """
+import json
+import os
 import time
 import logging
 import requests as http_requests
-from flask import Blueprint, current_app, request, jsonify
+from flask import Blueprint, Response, current_app, request, jsonify
 
 logger = logging.getLogger(__name__)
 history_bp = Blueprint('history', __name__)
@@ -173,74 +175,50 @@ def history_perimeters():
     )
 
 
+_DINS_MEMO = {}
+
+
 @history_bp.route('/dins', methods=['GET'])
 def history_dins():
-    """Return CAL FIRE DINS (Damage INSpection) points filtered by incident year.
+    """Fire-damaged structures (CAL FIRE DINS) for one incident year, 2013 on.
 
-    Query params:
-      year (int, REQUIRED) — incident year (2013 onward; CAL FIRE DINS coverage starts 2013).
-      service (str, optional) — override upstream URL (for ad-hoc fire-specific DINS).
+    Served from the validated per-year archive in data/dins/ (data.dins_archive,
+    refreshed daily by .github/workflows/dins-sync.yml): only HAZARDTYPE=Fire
+    with recorded damage (Destroyed/Major/Minor/Affected); undamaged and
+    inaccessible inspections are tallied per incident in `inspection_summary`.
+    A year with no archive file falls back to a live, identically filtered fetch.
 
-    Pages through ArcGIS's 2,000-row hard cap so big years (2018, 2020, 2025)
-    return the full set in one response. Cached 1 h per year.
+    Query params: year (int, required).
     """
+    from data import dins_archive
     try:
         year = int(request.args.get('year')) if request.args.get('year') else None
     except Exception:
         year = None
-    url = request.args.get('service') or DINS_DEFAULT_URL
-
     if year is None:
-        # Don't pull the full 132k statewide set in one shot — force a year filter.
         return jsonify({'type': 'FeatureCollection', 'features': [],
                         'error': 'year query param is required'}), 400
+    if year < dins_archive.FIRST_YEAR:
+        return jsonify({'type': 'FeatureCollection', 'features': [], 'inspection_summary': {},
+                        'note': 'CAL FIRE structure-damage inspections start in 2013'})
 
-    # Short key — full URL was overflowing String(128) → cache silently broken
-    cache_key = f"history_dins:{year}" if url == DINS_DEFAULT_URL else f"history_dins_alt:{abs(hash(url))%(10**10)}:{year}"
-
-    def _compute():
-        # INCIDENTSTARTDATE is a date field; bracket it to the calendar year.
-        where = (
-            f"INCIDENTSTARTDATE >= DATE '{year}-01-01' AND "
-            f"INCIDENTSTARTDATE < DATE '{year + 1}-01-01'"
-        )
-        base_params = {
-            'where': where,
-            'outFields': 'OBJECTID,DAMAGE,INCIDENTNAME,INCIDENTNUM,INCIDENTSTARTDATE,'
-                         'CITY,COUNTY,STREETNUMBER,STREETNAME,STREETTYPE,'
-                         'LATITUDE,LONGITUDE,STRUCTURETYPE,STRUCTURECATEGORY,YEARBUILT',
-            'outSR': '4326',
-            'f': 'geojson',
-            'resultRecordCount': DINS_PAGE_SIZE,
-        }
-        features = []
-        offset = 0
-        try:
-            for _ in range(20):
-                params = {**base_params, 'resultOffset': offset}
-                r = http_requests.get(url, params=params, timeout=30,
-                                      headers={'User-Agent': 'FireScopeProxy/1.0'})
-                r.raise_for_status()
-                page = r.json() or {}
-                page_feats = page.get('features') or []
-                features.extend(page_feats)
-                if len(page_feats) < DINS_PAGE_SIZE:
-                    break
-                offset += DINS_PAGE_SIZE
-        except Exception as e:
-            logger.warning('DINS proxy failed (year=%s): %s', year, e)
-            return {'type': 'FeatureCollection', 'features': []}
-        logger.info('DINS year=%s loaded %d structures', year, len(features))
-        return {'type': 'FeatureCollection', 'features': features}
-
-    from services.cache import serve_cached
-    return serve_cached(
-        cache_key=cache_key,
-        ttl_seconds=3600,
-        compute_fn=_compute,
-        db_freshness_seconds=_freshness(year),
-        cache_control='public, max-age=86400, stale-while-revalidate=604800, immutable',
-    )
+    path = dins_archive.path_for(year)
+    mtime = os.path.getmtime(path) if os.path.exists(path) else None
+    hit = _DINS_MEMO.get(year)
+    if hit is None or hit[0] != mtime:
+        if mtime is not None:
+            data = dins_archive.load_year(year)
+        else:
+            try:
+                data = dins_archive.fetch_year(year)
+            except Exception as e:
+                logger.warning('DINS live fallback failed (year=%s): %s', year, e)
+                return jsonify({'type': 'FeatureCollection', 'features': [], 'inspection_summary': {},
+                                'error': 'structure damage temporarily unavailable'}), 503
+        hit = (mtime, json.dumps(data, separators=(',', ':')).encode())
+        _DINS_MEMO[year] = hit
+    return Response(hit[1], mimetype='application/json',
+                    headers={'Cache-Control': 'public, max-age=3600, stale-while-revalidate=86400'})
 
 
 def _freshness(last_year):

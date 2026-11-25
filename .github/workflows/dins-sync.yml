@@ -1,0 +1,51 @@
+name: Daily structure-damage sync
+
+# Refreshes the CAL FIRE structure-damage archive (backend/data/dins/) for the
+# current and previous incident year: inspections keep arriving for weeks after
+# a fire. data.dins_archive validates every record and fails if the fetched
+# count differs from CAL FIRE's own count, so a source outage or schema change
+# turns this run red (and notify-failure.yml emails the details).
+
+on:
+  schedule:
+    - cron: '17 9 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install requests
+      - name: Sync current and previous year from CAL FIRE
+        working-directory: backend
+        run: python -m data.dins_archive sync
+      - name: Commit if records changed
+        id: commit
+        run: |
+          git config user.name 'IdoCohen560'
+          git config user.email 'ido.the.cohen@gmail.com'
+          git add backend/data/dins/
+          if git diff --cached --quiet; then
+            echo "no changes"
+          else
+            git commit -m "data: structure-damage sync ($(date -u +%F))"
+            for i in 1 2 3; do
+              git pull --rebase -q origin main && git push && break
+              [ "$i" = 3 ] && exit 1
+              sleep $((i * 10))
+            done
+            echo "pushed=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Deploy so the API serves the new records
+        if: steps.commit.outputs.pushed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run sync-domain-deployment.yml --repo "${{ github.repository }}"

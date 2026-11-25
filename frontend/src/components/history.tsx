@@ -19,7 +19,6 @@ import { Button } from "./ui/button";
 import { Badge } from "./ui/badge";
 import { Input } from "./ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
-import { Slider } from "./ui/slider";
 import { Switch } from "./ui/switch";
 import { Checkbox } from "./ui/checkbox";
 import { Map as GoogleMap, useMap } from '@vis.gl/react-google-maps';
@@ -127,27 +126,29 @@ const normFireName = (s: any): string => String(s || '')
   .replace(/[^A-Z0-9]+/g, ' ')
   .trim();
 
-const HistoricalFirePerimetersOverlay = memo(function HistoricalFirePerimetersOverlay({ fireData, selectedFire, onSelect, dinsData }: { fireData: any; selectedFire: any; onSelect: (props: any | null) => void; dinsData: any[] }) {
+const HistoricalFirePerimetersOverlay = memo(function HistoricalFirePerimetersOverlay({ fireData, selectedFire, onSelect, dinsSummary }: { fireData: any; selectedFire: any; onSelect: (props: any | null) => void; dinsSummary: Record<string, { name: string; counts: Record<string, number> }> }) {
   // Build incident-name → damage breakdown map (for the selected-fire card and
-  // the year aggregate). Memoised on dinsData so it's a single pass per year.
+  // the year aggregate). Built from CAL FIRE's per-incident inspection tally,
+  // which still counts undamaged/inaccessible inspections that the map omits.
   const damageByFire = useMemo(() => {
     const m = new Map<string, { total: number; destroyed: number; major: number; minor: number; affected: number; noDamage: number; other: number }>();
-    for (const f of dinsData || []) {
-      const name = normFireName(f?.properties?.INCIDENTNAME);
+    for (const inc of Object.values(dinsSummary || {})) {
+      const name = normFireName(inc.name);
       if (!name) continue;
-      const d = String(f?.properties?.DAMAGE || '');
       const cur = m.get(name) || { total: 0, destroyed: 0, major: 0, minor: 0, affected: 0, noDamage: 0, other: 0 };
-      cur.total += 1;
-      if (d.includes('Destroyed')) cur.destroyed += 1;
-      else if (d.includes('Major')) cur.major += 1;
-      else if (d.includes('Minor')) cur.minor += 1;
-      else if (d.includes('Affected')) cur.affected += 1;
-      else if (d.includes('No Damage')) cur.noDamage += 1;
-      else cur.other += 1;
+      for (const [d, n] of Object.entries(inc.counts || {})) {
+        cur.total += n;
+        if (d.includes('Destroyed')) cur.destroyed += n;
+        else if (d.includes('Major')) cur.major += n;
+        else if (d.includes('Minor')) cur.minor += n;
+        else if (d.includes('Affected')) cur.affected += n;
+        else if (d.includes('No Damage')) cur.noDamage += n;
+        else cur.other += n;
+      }
       m.set(name, cur);
     }
     return m;
-  }, [dinsData]);
+  }, [dinsSummary]);
   const yearDamageTotal = useMemo(() => {
     let total = 0; let destroyed = 0; let firesWithDamage = 0;
     for (const v of damageByFire.values()) {
@@ -376,17 +377,24 @@ const HistoricalFirePerimetersOverlay = memo(function HistoricalFirePerimetersOv
 
 // DINS Damage Overlay Component — receives dinsData from the parent so the
 // fetch happens once per year and is shared with the fire-info card.
+const DINS_OPACITY = 0.85;
+const DINS_RADIUS = 30;
+
+// Only show a field when CAL FIRE actually recorded it (no "Year built: 0").
+const known = (v: any) => v != null && v !== '' && v !== 0 && v !== 'Unknown';
+const fireStart = (ms: any) => (ms ? new Date(ms).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric', timeZone: 'UTC' }) : '');
+
 function DINSDamageOverlay({
   enabled,
-  opacity,
-  radius,
   dinsData,
+  fireCauseByName,
 }: {
   enabled: boolean;
-  opacity: number;
-  radius: number;
   dinsData: any[];
+  fireCauseByName: Map<string, string>;
 }) {
+  const opacity = DINS_OPACITY;
+  const radius = DINS_RADIUS;
   const map = useMap();
   const overlayRef = useRef<GoogleMapsOverlay | null>(null);
   const [hoveredStructure, setHoveredStructure] = useState<any>(null);
@@ -499,11 +507,10 @@ function DINSDamageOverlay({
             maxWidth: '280px'
           }}
         >
-          <div className="font-bold mb-1">{hoveredStructure.SITEADDRESS || 'Unknown address'}</div>
+          <div className="font-bold mb-1">{hoveredStructure.SITEADDRESS || [hoveredStructure.CITY, hoveredStructure.COUNTY].filter(Boolean).join(', ') || 'Address not recorded'}</div>
           <div className="text-xs">
             <div><strong>Damage:</strong> {hoveredStructure.DAMAGE}</div>
-            {hoveredStructure.CITY && <div><strong>City:</strong> {hoveredStructure.CITY}</div>}
-            {hoveredStructure.COUNTY && <div><strong>County:</strong> {hoveredStructure.COUNTY}</div>}
+            <div><strong>Fire:</strong> {hoveredStructure.INCIDENTNAME} Fire{hoveredStructure.INCIDENTSTARTDATE ? ` (started ${fireStart(hoveredStructure.INCIDENTSTARTDATE)})` : ''}</div>
           </div>
         </div>
       )}
@@ -531,7 +538,7 @@ function DINSDamageOverlay({
           >
             ×
           </button>
-          <h3 className="font-bold text-base mb-3 pr-6">{selectedStructure.SITEADDRESS || 'Unknown address'}</h3>
+          <h3 className="font-bold text-base mb-3 pr-6">{selectedStructure.SITEADDRESS || [selectedStructure.CITY, selectedStructure.COUNTY].filter(Boolean).join(', ') || 'Address not recorded'}</h3>
           <div className="space-y-2 text-sm">
             <div>
               <strong>Damage:</strong>{' '}
@@ -545,8 +552,18 @@ function DINSDamageOverlay({
                 {selectedStructure.DAMAGE}
               </span>
             </div>
+            <div><strong>Damaged by:</strong> {selectedStructure.INCIDENTNAME} Fire{selectedStructure.INCIDENTSTARTDATE ? `, started ${fireStart(selectedStructure.INCIDENTSTARTDATE)}` : ''}</div>
+            {fireCauseByName.get(normFireName(selectedStructure.INCIDENTNAME)) && (
+              <div><strong>Fire cause:</strong> {fireCauseByName.get(normFireName(selectedStructure.INCIDENTNAME))}</div>
+            )}
+            {known(selectedStructure.WHATDIDFIRESTARTFROM) && <div><strong>How fire reached it:</strong> {selectedStructure.WHATDIDFIRESTARTFROM}</div>}
+            {known(selectedStructure.WHEREFIRESTARTEDONSTRUCTURE) && <div><strong>Where it ignited:</strong> {selectedStructure.WHEREFIRESTARTEDONSTRUCTURE}</div>}
+            {known(selectedStructure.DEFENSIVEACTIONS) && <div><strong>Defense actions:</strong> {selectedStructure.DEFENSIVEACTIONS}</div>}
+            {known(selectedStructure.STRUCTURETYPE) && <div><strong>Structure:</strong> {selectedStructure.STRUCTURETYPE}</div>}
+            {known(selectedStructure.YEARBUILT) && <div><strong>Year built:</strong> {selectedStructure.YEARBUILT}</div>}
             {selectedStructure.CITY && <div><strong>City:</strong> {selectedStructure.CITY}</div>}
             {selectedStructure.COUNTY && <div><strong>County:</strong> {selectedStructure.COUNTY}</div>}
+            <div className="text-[11px] text-muted-foreground pt-1">Source: CAL FIRE Damage Inspection (DINS)</div>
           </div>
         </div>
       )}
@@ -562,11 +579,13 @@ export function History() {
   // both overlays plus the fire info card (so the per-fire damage breakdown
   // doesn't trigger a duplicate fetch).
   const [dinsData, setDinsData] = useState<any[]>([]);
+  const [dinsSummary, setDinsSummary] = useState<Record<string, any>>({});
   const [dinsCount, setDinsCount] = useState<number | null>(null);
   useEffect(() => {
     setDinsCount(null);
     if (!selectedYear || selectedYear < 2013) {
       setDinsData([]);
+      setDinsSummary({});
       setDinsCount(0);
       return;
     }
@@ -577,6 +596,7 @@ export function History() {
         if (cancelled) return;
         const feats = data?.features || [];
         setDinsData(feats);
+        setDinsSummary(data?.inspection_summary || {});
         setDinsCount(feats.length);
       })
       .catch((e) => {
@@ -597,9 +617,18 @@ export function History() {
   // (30k+ points; user opts in). Perimeters always render filled at full opacity.
   const [showPerimeters, setShowPerimeters] = useState(true);
   const [showDins, setShowDins] = useState(false);
-  const [dinsOpacity, setDinsOpacity] = useState(0.85);
-  const [dinsRadius, setDinsRadius] = useState(30);
   const [fireData, setFireData] = useState<any>(null); // Filtered features for the selected year
+  // Fire name -> FRAP-recorded cause, so a damaged structure's popup can say what
+  // started the fire that damaged it.
+  const fireCauseByName = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const f of fireData?.features || []) {
+      const p = f?.properties || {};
+      const n = normFireName(p.FIRE_NAME);
+      if (n && p.CAUSE != null && p.CAUSE !== '') m.set(n, causeLabel(p.CAUSE));
+    }
+    return m;
+  }, [fireData]);
   const [allFeatures, setAllFeatures] = useState<any[] | null>(null); // Full dataset, loaded once
   const [availableYears, setAvailableYears] = useState<number[]>([]); // Derived from loaded data
   const [showYearDropdown, setShowYearDropdown] = useState(false);
@@ -935,7 +964,7 @@ export function History() {
                       fireData={fireData}
                       selectedFire={selectedFire}
                       onSelect={handleOverlaySelect}
-                      dinsData={dinsData}
+                      dinsSummary={dinsSummary}
                     />
                   )}
                   {/* Structure Damage (DINS) — sits on top of the perimeter
@@ -943,9 +972,8 @@ export function History() {
                       against the burn area. */}
                   <DINSDamageOverlay
                     enabled={showDins}
-                    opacity={dinsOpacity}
-                    radius={dinsRadius}
                     dinsData={dinsData}
+                    fireCauseByName={fireCauseByName}
                   />
                 </GoogleMap>
               </div>
@@ -973,23 +1001,6 @@ export function History() {
                     </label>
                   </div>
                 </div>
-
-                {showDins && (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2 border-t">
-                    <div>
-                      <label className="text-xs text-muted-foreground flex justify-between mb-1">
-                        <span>Point radius</span><span>{dinsRadius}m</span>
-                      </label>
-                      <Slider value={[dinsRadius]} min={5} max={150} step={5} onValueChange={(v) => setDinsRadius(v[0])} />
-                    </div>
-                    <div>
-                      <label className="text-xs text-muted-foreground flex justify-between mb-1">
-                        <span>Opacity</span><span>{Math.round(dinsOpacity * 100)}%</span>
-                      </label>
-                      <Slider value={[Math.round(dinsOpacity * 100)]} min={20} max={100} step={5} onValueChange={(v) => setDinsOpacity(v[0] / 100)} />
-                    </div>
-                  </div>
-                )}
 
                 <div className="pt-3 border-t">
                   <h4 className="font-semibold text-sm mb-2">Fire size (perimeter color)</h4>

@@ -258,7 +258,7 @@ export function SettingsPage({ defaultTab = "profile" }: SettingsPageProps) {
                   />
                   <AboutItem
                     name="CAL FIRE DINS (Damage Inspection) — 2013 to present"
-                    description="Post-fire structure damage inspection records from CAL FIRE's POSTFIRE_MASTER_DATA_SHARE feature service (132,000+ structures statewide). Coverage starts 2013 — older fires don't have DINS records because the program didn't exist. Backend /api/history/dins?year=YYYY filters by INCIDENTSTARTDATE; the History page's 'Structure Damage (DINS)' toggle renders the matching points layered over that year's fire perimeters, plus a per-fire damage breakdown in the fire-info card."
+                    description="Fire-damaged structures from CAL FIRE's Damage Inspection (DINS) program: 77,500+ structures recorded Destroyed, Major, Minor or Affected by wildfire, 2013 to the latest published inspections (CAL FIRE's inspections begin in 2013). Each structure is assigned to the year its fire started, and each record shows the fire that damaged it, the fire's cause, how damaged it was and, where inspectors recorded it, how the fire reached it. Undamaged inspections are counted in each fire's summary but not drawn on the map. FireScope keeps a validated copy of every year and refreshes it daily."
                     badge="State agency · 2013→present"
                     badgeColor="bg-orange-100 text-orange-700"
                   />

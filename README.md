@@ -44,7 +44,9 @@ Senior research project at **California State University, Northridge** (ARCS, 20
 |---|---|
 | **Dashboard** | Split view — risk-zone map (county / ZIP / tract / neighborhood) + active-fire perimeter map with 4-tier containment coloring and a live active-fire count. |
 | **Research page** | Per-zone slider overrides (EVI, temp, wind, humidity, elevation, **KBDI** 0–800) with live risk recompute; save a zone for 24h; 20-zone shared cap; researcher shelter overlay. |
-| **History** | 22k+ CAL FIRE perimeters back to 1878, year + fire search, decoded CAUSE codes, and per-year **DINS structure-damage** (2013→present) with Destroyed/Major/Minor/Affected breakdowns. |
+| **History** | 22k+ CAL FIRE perimeters back to 1878, year + fire search, decoded CAUSE codes, and per-year **DINS structure-damage** (2013→present): fire-damaged structures only (Destroyed/Major/Minor/Affected; undamaged
+inspections are counted per fire, not mapped), each with the fire that damaged it and its cause,
+served from a validated per-year archive refreshed dailys. |
 | **Shelters & Evacuation** | 8,014 CA shelters (CalOES mirror) with in-map routing + Open-in-Google-Maps; live Cal OES evacuation **orders / warnings / advisories / shelter-in-place**; 60s auto-refresh. |
 | **Alerts** | Per-user master switch + four channel toggles (high-risk zones / breaking news / evacuation / wildfire-in-your-county); RFC 8058 one-click unsubscribe. |
 | **Admin** | User management, refresh schedules, model configuration. |
@@ -116,7 +118,7 @@ Details in [`backend/ml/README.md`](backend/ml/README.md) and [docs/ARCHITECTURE
   (MERRA-2), skill-weighted per feature;
   drought (KBDI) from NASA POWER with Open-Meteo as backup
 - **Fire agencies** — CAL FIRE Incidents & Historic Perimeters, NIFC WFIGS, CAL FIRE DINS damage
-  (132,000+ structures, 2013→present)
+  (77,500+ fire-damaged structures, 2013→present; archived in `backend/data/dins/`)
 - **Emergency management** — Cal OES `CA_EVACUATIONS_PROD` (Genasys PROTECT + county feeds),
   CalOES shelter mirror (8,014 facilities)
 - **Weather & news** — Open-Meteo + NASA POWER (weather), NOAA NWS ATOM feed, GNews + Google

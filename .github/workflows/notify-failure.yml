@@ -17,6 +17,7 @@ on:
       - "Daily zone-risk pre-warm"
       - "Daily training ingest + gated retrain"
       - "Restart Render after backend deploy"
+      - "Daily structure-damage sync"
     types: [completed]
 
 permissions:
