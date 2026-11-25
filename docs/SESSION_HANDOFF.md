@@ -1,13 +1,38 @@
 # FireScope — Session Handoff
 
-**Stable tag:** `v3.2-stable` (2026-06-19) — prior: `v3.1-stable` (commit `0b7ed78`, 2026-06-03)
+**Stable tag:** `v3.3-stable` (2026-11-25) — prior: `v3.2-stable` (2026-06-19)
 **Live URL:** https://firescope.dev (custom domain, HTTPS) · https://firescope.netlify.app
 **API:** https://firescope-api.onrender.com/api
-**GitHub Release:** https://github.com/CSUN-ARCS-GeoInfoVisualization/geo-info-data-visualization-project/releases/tag/v3.1-stable
+**GitHub Release:** https://github.com/CSUN-DSR-GeoInfoVisualization/geo-info-data-visualization-project/releases/tag/v3.3-stable
+**Repo:** the GitHub org was renamed from `CSUN-ARCS-GeoInfoVisualization` to `CSUN-DSR-GeoInfoVisualization` (old URLs redirect).
 
 This document is the single source of truth for picking up FireScope work in a fresh session. Read this first, then `README.md`, then jump in.
 
 ---
+
+## What v3.3-stable adds (on top of v3.2)
+
+A **training-data integrity, observability and security** release. See `CHANGELOG.md` for the full list.
+
+- **Matched-control training set** (`california_matched.csv`): each fire is paired with the same point
+  one year earlier, fixing the inverted physics the random no-fire sampler taught. Weekly gate now uses
+  a leak-free, location-grouped holdout. `california_daily.csv` is a historical record only.
+- **Observed, backed-up, cross-referenced features**: daily ingest uses detections 6 days back
+  (`INGEST_LAG_DAYS`); every feature has a backup measuring the same quantity (ERA5 → MERRA-2 weather,
+  Earth Engine → ORNL EVI, NASA POWER → Open-Meteo KBDI, USGS → Open-Elevation); ERA5 vs MERRA-2
+  weather is cross-checked; a point with no source left is dropped, never interpolated.
+- **FIRMS feed**: NOAA-20 VIIRS (the S-NPP NRT feed went empty ~2026-11-06). Date-targeted backfill
+  (`daily-retrain.yml` `date` input).
+- **Every failure is emailed** to the owner: hourly API digest of logged failures/fallbacks
+  (`services/failure_digest.py`), `notify-failure.yml` for any failed workflow, one-class ingest alert,
+  2-day training-data stall (fails red).
+- **Security**: unauthenticated legacy alert blueprint removed; admin cron routes require
+  `X-Internal-Token`; per-IP rate limits on login/register/predict; signup never grants Admin;
+  production refuses to start without real secrets.
+- **Ops**: gunicorn `--threads 8` (an ingest no longer stalls page loads); the map's fallback no longer
+  fans one failed weather batch out into 9 Open-Meteo calls per zone.
+- **Model**: production model unchanged (2026-08-17). Weekly auto-promotion is **held in dry-run**
+  (`weekly-promote.yml`) until the first matched-control model is reviewed.
 
 ## What v3.2-stable adds (on top of v3.1)
 

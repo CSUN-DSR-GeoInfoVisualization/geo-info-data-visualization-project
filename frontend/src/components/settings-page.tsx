@@ -191,7 +191,7 @@ export function SettingsPage({ defaultTab = "profile" }: SettingsPageProps) {
                     <div>
                       <span className="font-semibold text-foreground">Source: </span>
                       <a
-                        href="https://github.com/CSUN-ARCS-GeoInfoVisualization/geo-info-data-visualization-project"
+                        href="https://github.com/CSUN-DSR-GeoInfoVisualization/geo-info-data-visualization-project"
                         target="_blank"
                         rel="noopener noreferrer"
                         className="text-blue-600 hover:underline"
@@ -211,7 +211,7 @@ export function SettingsPage({ defaultTab = "profile" }: SettingsPageProps) {
                 </div>
                 <div className="divide-y">
                   <AboutItem
-                    name="NASA FIRMS (VIIRS SNPP)"
+                    name="NASA FIRMS (VIIRS NOAA-20)"
                     description="Real-time satellite fire detection. Provides active fire hotspots with latitude, longitude, confidence level, and Fire Radiative Power (FRP) measurements updated multiple times daily."
                     badge="Real-time"
                     badgeColor="bg-red-100 text-red-700"
@@ -348,19 +348,19 @@ export function SettingsPage({ defaultTab = "profile" }: SettingsPageProps) {
                   />
                   <AboutItem
                     name="Daily training ingest (NASA FIRMS)"
-                    description="Every day a GitHub Actions workflow (.github/workflows/daily-retrain.yml) pulls the latest NASA FIRMS satellite fire detections, computes the six features at each detection plus sampled no-fire points, and appends the rows that pass the data-quality checks to the committed training set (backend/ml/training_data/california_daily.csv). It runs all year, so winter no-fire conditions accumulate alongside summer fires — the model learns the full seasonal range through the weather and drought features, not a calendar input."
+                    description="Every day a GitHub Actions workflow (.github/workflows/daily-retrain.yml) pulls NASA FIRMS satellite fire detections from 6 days earlier, so every feature is measured weather rather than a forecast. Each detection is paired with a matched control: the same location on the same date one year earlier. The model therefore learns which conditions lead to fire, not where fires tend to happen. Rows that pass the data-quality checks are appended to the committed training set (backend/ml/training_data/california_matched.csv). It runs all year, so winter conditions accumulate alongside summer fires."
                     badge="Cron · daily"
                     badgeColor="bg-amber-100 text-amber-700"
                   />
                   <AboutItem
                     name="Data-quality safeguards (every row is vetted)"
-                    description="Before a row can train the model it must clear several checks: physical-range and missing-value sanity; a low-confidence filter on FIRMS fire labels (drops likely false positives); a California-land mask plus active-perimeter and 3-day fire-window check on no-fire points (so a 'no-fire' point is never actually in a burning area); and cross-source weather corroboration — each point's Open-Meteo reading is compared against an independent provider (MET Norway) and dropped if they grossly disagree. Rejected rows are quarantined for review, never trained on."
+                    description="Before a row can train the model it must clear several checks: physical-range and missing-value sanity; a low-confidence filter on FIRMS fire labels (drops likely false positives); a California-land mask; and cross-referencing of weather between two independent reanalyses (Open-Meteo ERA5 and NASA POWER MERRA-2), dropping rows where they grossly disagree. Every feature has a backup source that measures the same quantity (weather, vegetation, drought, elevation); if no source is available the point is skipped, never filled with an estimate. Rejected rows are quarantined for review and every failure or fallback is emailed to the maintainers."
                     badge="Data quality"
                     badgeColor="bg-sky-100 text-sky-700"
                   />
                   <AboutItem
                     name="Weekly monitoring & gated auto-promotion"
-                    description="Every Sunday night the system scans the ingested data for statistical outliers and distribution drift, back-tests the live model against recent real fires, and cross-checks cached terrain data — emailing the team on any problem. It then retrains on the full rolling dataset and auto-promotes the new model to production only if it clears the gate (physics monotonicity + held-out AUROC/Brier non-regression); the previous model is archived. Manual promotion any day before Sunday remains available."
+                    description="Every Sunday night the system scans the ingested data for statistical outliers and distribution drift, back-tests the live model against recent real fires, and cross-checks cached terrain data, emailing the team on any problem. It then retrains and evaluates the candidate against the gate (physics monotonicity plus AUROC/Brier non-regression on a leak-free holdout). Automatic promotion is currently paused while the first matched-control model is reviewed by hand."
                     badge="Auto · weekly"
                     badgeColor="bg-red-100 text-red-700"
                   />

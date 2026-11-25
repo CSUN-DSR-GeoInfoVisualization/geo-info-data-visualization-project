@@ -178,7 +178,7 @@ _EVAC_STROKE_OPACITY = 0.9
 # jsDelivr serves with `max-age=604800` and works first try, plus it's
 # globally CDN-cached and auto-purges on every commit.
 _EMAIL_ICON_BASE = (
-    "https://cdn.jsdelivr.net/gh/CSUN-ARCS-GeoInfoVisualization/"
+    "https://cdn.jsdelivr.net/gh/CSUN-DSR-GeoInfoVisualization/"
     "geo-info-data-visualization-project@main/frontend/public/email-icons"
 )
 _SHELTER_PIN_URLS = {

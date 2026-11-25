@@ -190,8 +190,8 @@ only if it survives a physics-direction + metric gate:
 ```mermaid
 %%{init: {'themeVariables': {'edgeLabelBackground': '#ffffff'}, 'themeCSS': '.edgeLabel rect{opacity:1 !important;fill:#ffffff !important;} .edgeLabel,.edgeLabel p,.edgeLabel span,.edgeLabel div{background-color:#ffffff !important;color:#16181d !important;}'}}%%
 flowchart LR
-    F["FIRMS detections<br/>+ matched no-fire points"] --> EN["enrich via get_feature<br/>(same spine as prod)"]
-    EN --> DS["append in-repo dataset<br/>california_daily.csv"]
+    F["FIRMS detections (6 days back)<br/>+ same-point controls 1 year earlier"] --> EN["observed features<br/>backup source per feature<br/>ERA5 vs MERRA-2 cross-check"]
+    EN --> DS["append in-repo dataset<br/>california_matched.csv"]
     DS --> TR["train monotonic candidate"]
     TR --> G{"physics + metric gate"}
     G -->|pass| PR["archive old · promote .pkl<br/>append RETRAIN_LOG.md"]

@@ -4,6 +4,66 @@ All notable changes to FireScope are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The authoritative working notes live in
 [`docs/SESSION_HANDOFF.md`](docs/SESSION_HANDOFF.md).
 
+## [3.3-stable] — 2026-11-25
+
+Training-data integrity, failure alerting, and security hardening.
+
+### Added
+- **Matched-control training set** (`training_data/california_matched.csv`): every fire is paired with
+  the same point on the same date one year earlier, with every time-varying feature backdated to that
+  date. Replaces uniform-random no-fire points, which taught the model *where* fires happen (and
+  inverted the humidity/temperature/wind priors) rather than fire *conditions*.
+- **Backup source for every training feature**, each measuring the same quantity: weather Open-Meteo
+  archive (ERA5) → NASA POWER (MERRA-2); EVI Earth Engine → NASA ORNL DAAC (same MOD13Q1 composite
+  rule); KBDI spinup NASA POWER → Open-Meteo archive; elevation USGS 3DEP → Open-Elevation. A point with
+  no source left is dropped, never interpolated.
+- **Weather cross-reference** between two independent reanalyses (ERA5 vs MERRA-2, same ±3-day window
+  and definitions); tolerances (8 °C / 30 RH pts / 5 m/s) sit above the largest disagreement measured
+  on validated rows.
+- **Failure emails to the owner**: an hourly digest of every failure, fallback and error the API logs
+  (`services/failure_digest.py`); `notify-failure.yml` emails the failed jobs/steps and log tail of any
+  workflow run that doesn't succeed; the daily ingest alerts when a run returns only one class.
+- Date-targeted ingest backfill (`daily-retrain.yml` `date` input); per-point fetch failures, class
+  counts and single-source counts in the ingest response and workflow log.
+- Per-IP rate limits on `/login` (plus per account), `/register` and `/predict*`.
+
+### Changed
+- Daily ingest uses detections from **6 days back** so every feature is observed, not forecast, and
+  present in both weather sources.
+- Controls pair only with accepted fires; even 30 s / 30 s fire/control budget.
+- Weekly gate: leak-free, location-grouped holdout (the previous holdout let the production model be
+  scored on rows it was trained on, so every candidate was rejected from 2026-08-24 to 2026-11-16).
+- **Weekly auto-promotion held in dry-run** until the first matched-control model is reviewed.
+- gunicorn runs with `--threads 8`, so a long ingest no longer stalls page loads.
+- Training-data stall watchdog fails the run red after 2 days without new data.
+
+### Fixed
+- **Daily ingest stopped on 2026-11-06**: the NASA FIRMS S-NPP NRT feed went empty; switched to
+  VIIRS NOAA-20.
+- Ingest rows could silently carry interpolated EVI/KBDI when a live source failed; 11 such rows from
+  2026-11-20 removed.
+- The previous second weather source compared a current-hour reading with a 3-day mean and dropped
+  valid fire rows.
+- Archive-weather lookups failed for the last 3 days of dates (end date past today); now clamped and
+  retried.
+- The zone-risk fallback multiplied one failed weather batch into many Open-Meteo calls, exhausting
+  the shared rate limit for other callers.
+- `quarantine.csv` was gitignored, so rejected-row records were never kept.
+- Daily pre-warm failed every day on the retired Cal OES shelters source, which also stopped the
+  endpoints after it from warming.
+
+### Security
+- Removed a legacy, unwired-in-docs alert blueprint whose routes lacked authentication, and its
+  scheduler (its jobs also failed on every run).
+- Admin cron endpoints now require the internal token.
+- Signup never grants the Admin role.
+- Production refuses to start without `SECRET_KEY` and `JWT_SECRET_KEY`.
+- Removed an unused component that embedded an API key.
+
+### Removed
+- `backend/data/weather_crosscheck.py` (MET Norway cross-check), `backend/routes/alerts.py`,
+  `frontend/src/components/FIRMSMap.tsx`.
+
 ## [3.2-stable] — 2026-06-19
 
 ### Added

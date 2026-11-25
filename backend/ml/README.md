@@ -30,7 +30,7 @@ The nearest fallback location is selected using great-circle (haversine) distanc
 | Algorithm | Monotonicity-constrained `HistGradientBoostingClassifier`, isotonic-calibrated |
 | Trainer | `train_monotonic.py` (model) + `retrain_and_gate.py` (gated promotion) |
 | File | `models/wildfire_model_predictive.pkl` |
-| Training data | Rolling: `training_data/california_2020_kbdi.csv` base + `training_data/california_daily.csv` (grown daily by the FIRMS ingest cron), de-duped |
+| Training data | `training_data/california_matched.csv`: every fire paired with a same-point control one year earlier, grown daily by the ingest cron, de-duped. (`california_daily.csv` is the historical record of the earlier random-point sampling and is no longer trained on.) |
 | Evaluation | 80/20 stratified held-out split; promotion gated on physics (monotonicity) + AUROC/Brier non-regression |
 | Metrics | See `models/RETRAIN_LOG.md` and `models/model_metadata.json` (last promotion 2026-06-03: held-out AUROC ≈ 0.888) |
 | Features | EVI, air temperature (encoded), wind speed, humidity, elevation, KBDI |
@@ -45,14 +45,20 @@ The model is trained with **monotonic constraints** (`monotonic_cst=[0,1,1,-1,0,
 The training set grows daily and the model self-updates weekly, both fully in GitHub Actions (no DB
 cost-risk — the dataset lives in-repo). Every row is vetted before it can train the model.
 
-**Ingest gate (per row, `routes/ml_ingest.py`):**
-- **Range/sanity** — feature values must be within physical bounds, in California, non-NaN.
-- **Label confidence** — low-confidence FIRMS detections are dropped (likely false positives).
-- **No-fire verification** — a sampled no-fire point is rejected if it's inside an active NIFC
-  perimeter or near a fire in a 3-day FIRMS window, and must fall on CA land (county polygon mask).
-- **Cross-source corroboration** — each point's Open-Meteo weather is compared to an independent
-  provider (MET Norway); grossly disagreeing points are dropped. Fail-open, ingest-only.
-- Rejected rows are appended to `training_data/quarantine.csv` for review.
+**Ingest (per row, `routes/ml_ingest.py`):**
+- **Observed data only** — the daily run ingests detections from 6 days back (`INGEST_LAG_DAYS`), so
+  the whole ±3-day weather window is observed and present in both weather sources.
+- **Matched controls** — each accepted fire gets a control at the same lat/lon one year earlier, with
+  every time-varying feature backdated to that date. Controls pair only with accepted fires.
+- **Backup per feature (same quantity)** — weather: Open-Meteo archive (ERA5) → NASA POWER (MERRA-2);
+  EVI: Earth Engine → ORNL DAAC (same MOD13Q1 composite rule); KBDI spinup: NASA POWER → Open-Meteo
+  archive; elevation: USGS 3DEP → Open-Elevation. No source left → the point is dropped, never
+  interpolated.
+- **Cross-reference** — ERA5 vs MERRA-2 weather must agree within 8 °C / 30 RH pts / 5 m/s (above the
+  largest disagreement measured on validated rows: 5.1 / 24.7 / 3.2); gross disagreement drops the row.
+- **Range/sanity, label confidence, CA-land mask** as before.
+- Rejected rows are appended to `training_data/quarantine.csv` (committed) for review; per-point
+  fetch failures are returned in the ingest response and printed in the workflow log.
 
 **Weekly monitors (`POST /api/internal/ml/...`):**
 - `data-health` — robust-z outlier rate + PSI drift (recent vs earlier ingest) + a random row sample.
@@ -62,8 +68,9 @@ cost-risk — the dataset lives in-repo). Every row is vetted before it can trai
 
 **Promotion:**
 - `daily-retrain.yml` (daily) ingests + retrains a candidate **dry-run** (logs the gate decision).
-- `weekly-promote.yml` (Sunday night) retrains and **auto-promotes** if the candidate clears the gate
-  (physics + AUROC/Brier non-regression), archives the previous model, deploys, and emails the owner.
+- `weekly-promote.yml` (Sunday night) retrains and evaluates the gate (physics + AUROC/Brier
+  non-regression on a leak-free holdout). **Currently held in dry-run** (`--dry-run`) until the first
+  matched-control model is reviewed; remove the flag to re-enable auto-promotion.
 - Manual promotion any day: run `daily-retrain.yml` with `promote=true`.
 
 ## Feature encoding
