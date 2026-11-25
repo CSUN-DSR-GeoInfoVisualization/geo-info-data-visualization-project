@@ -24,7 +24,7 @@ In the app you can:
   scale, beside a live active-fire perimeter map with containment coloring.
 - **Probe the model** — on the Research page, drag sliders for any zone (EVI, temperature, wind,
   humidity, elevation, KBDI) and watch the risk recompute; save a zone's snapshot for 24 hours.
-- **Look back** — 22,000+ CAL FIRE perimeters to 1878, with per-year CAL FIRE DINS structure-damage
+- **Look back** — every CAL FIRE perimeter on record (23,000+, 1878 → present, every size), with per-year CAL FIRE DINS structure-damage
   overlays so a 0-structure wildland burn reads differently from an urban-interface catastrophe.
 - **Find safety** — 8,014 pre-staged California shelters with click-to-route, plus live statewide
   evacuation orders and warnings (the same Cal OES source Watch Duty consumes).
@@ -44,7 +44,7 @@ Senior research project at **California State University, Northridge** (ARCS, 20
 |---|---|
 | **Dashboard** | Split view — risk-zone map (county / ZIP / tract / neighborhood) + active-fire perimeter map with 4-tier containment coloring and a live active-fire count. |
 | **Research page** | Per-zone slider overrides (EVI, temp, wind, humidity, elevation, **KBDI** 0–800) with live risk recompute; save a zone for 24h; 20-zone shared cap; researcher shelter overlay. |
-| **History** | 22k+ CAL FIRE perimeters back to 1878, year + fire search, decoded CAUSE codes, and per-year **DINS structure-damage** (2013→present): fire-damaged structures only (Destroyed/Major/Minor/Affected; undamaged
+| **History** | All 23k+ CAL FIRE perimeters back to 1878 (every recorded size), year + fire search, decoded CAUSE codes, and per-year **DINS structure-damage** (2013→present): fire-damaged structures only (Destroyed/Major/Minor/Affected; undamaged
 inspections are counted per fire, not mapped), each with the fire that damaged it and its cause,
 served from a validated per-year archive refreshed dailys. |
 | **Shelters & Evacuation** | 8,014 CA shelters (CalOES mirror) with in-map routing + Open-in-Google-Maps; live Cal OES evacuation **orders / warnings / advisories / shelter-in-place**; 60s auto-refresh. |
