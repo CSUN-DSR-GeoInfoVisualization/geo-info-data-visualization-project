@@ -9,6 +9,13 @@ All notable changes to FireScope are documented here. The format is based on
 Training-data integrity, failure alerting, and security hardening.
 
 ### Added
+- **Structure-damage archive** (`backend/data/dins/`, `data/dins_archive.py`): every CAL FIRE DINS
+  fire-damaged structure 2013 → latest published (77,515 across 2013–2025; CAL FIRE's point-level
+  inspections begin 2013-08-07), validated (fire hazard, recorded damage, in-California coordinates,
+  incident name/number/date, de-duplicated) and checked against CAL FIRE's own counts per year. Each
+  incident keeps its full inspection tally, including undamaged and inaccessible structures.
+  `dins-sync.yml` refreshes the current and previous year daily; `/api/history/dins` serves the
+  archive and falls back to a live, identically filtered fetch.
 - **Three-source, skill-weighted weather** for training rows: NOAA RTMA (2.5 km hourly analysis of
   surface observations, via Earth Engine) joins ERA5 and MERRA-2. Per-feature weights come from measured
   error against 212 station samples (15 ASOS airports + 7 independent USCRN sites, Jun–Nov 2026),
@@ -56,6 +63,11 @@ Training-data integrity, failure alerting, and security hardening.
 - Training-data stall watchdog fails the run red after 2 days without new data.
 
 ### Fixed
+- **History → structure damage**: 41% of mapped points were undamaged inspections; the map now shows
+  only fire-damaged structures. The popup read an address field the API never requested (always
+  "Unknown address"); it now shows the address, damage level, the fire that caused it, that fire's
+  cause, and (where recorded) how fire reached the structure, hiding unrecorded fields. The two
+  point-size/opacity sliders were removed.
 - **Database out-of-memory crashes**: the 256 MB Postgres was OOM-killed 13 times (2026-11-20 and -25).
   The boot cache warm no longer loads the multi-MB fire-history rows, and past-year fire history never
   expires, so it is never recomputed and rewritten.
