@@ -121,7 +121,6 @@ def _features_for(lat, lon):
     }
 
 
-_ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 
 
 def _weather_for_date(lat, lon, date_str):
@@ -139,15 +138,17 @@ def _weather_for_date(lat, lon, date_str):
     # The archive rejects any end_date after today, which failed the whole lookup
     # for the last 3 days of dates; clamp to the newest day it holds.
     end = min(t + _dt.timedelta(days=3), _dt.datetime.utcnow() - _dt.timedelta(days=1)).strftime("%Y-%m-%d")
+    from data.open_meteo import archive, RateLimited
     for attempt in range(3):
         try:
-            r = requests.get(_ARCHIVE_URL, params={
+            r = archive({
                 "latitude": lat, "longitude": lon, "start_date": start, "end_date": end,
                 "daily": "wind_speed_10m_max,temperature_2m_mean,relative_humidity_2m_mean",
                 "wind_speed_unit": "ms", "timezone": "America/Los_Angeles",
-            }, timeout=15)
-            r.raise_for_status()
+            })
             break
+        except RateLimited:
+            raise  # never silently drop to fewer weather sources
         except Exception as e:
             if attempt == 2:
                 logger.warning("archive weather failed @ %.3f,%.3f %s: %s", lat, lon, date_str, e)
@@ -348,8 +349,8 @@ def _features_for_historical(lat, lon, date_str):
                    "era5": era5 and {"temperature_celsius": era5["air_temp_encoded"] * 0.02 - 273.15,
                                      "humidity": era5["humidity"], "wind_speed": era5["wind"]}}
     sources = {n: v for n, v in sources.items() if v}
-    if not sources:
-        raise RuntimeError(f"no weather from RTMA, Open-Meteo archive or NASA POWER on {date_str}")
+    if len(sources) < 2:  # one source has nothing to cross-check it against
+        raise RuntimeError(f"only {len(sources)} weather source(s) ({', '.join(sources) or 'none'}) on {date_str}; need 2")
     wx, notes = _blend_weather(sources)
     if notes:
         logger.warning("weather outlier dropped @ %.3f,%.3f %s: %s", lat, lon, date_str, "; ".join(notes))

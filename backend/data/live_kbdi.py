@@ -214,7 +214,8 @@ def _spinup_open_meteo(lat: float, lon: float, date_str: str) -> list[tuple[floa
     archive, returned in the same (T_max_F, precip_in) form."""
     from ml.enrich_kbdi import SPINUP_DAYS
     end = datetime.strptime(date_str, "%Y-%m-%d")
-    r = requests.get("https://archive-api.open-meteo.com/v1/archive", params={
+    from data.open_meteo import archive
+    r = archive({
         "latitude": lat, "longitude": lon, "timezone": "America/Los_Angeles",
         "start_date": (end - timedelta(days=SPINUP_DAYS - 1)).strftime("%Y-%m-%d"),
         "end_date": end.strftime("%Y-%m-%d"),
