@@ -197,7 +197,13 @@ jobs:
             echo "nothing to commit"
           else
             git commit -m "ml: daily ingest$( [ "${{ inputs.promote }}" = "true" ] && echo ' + model promotion')  ($(date -u +%F))"
-            git push
+            # main may have moved during the run (a code push); a rejected push used to
+            # drop the run's rows. Rebase onto it and retry.
+            for i in 1 2 3; do
+              git pull --rebase -q origin main && git push && break
+              [ "$i" = 3 ] && exit 1
+              sleep $((i * 10))
+            done
             echo "pushed=true" >> "$GITHUB_OUTPUT"
           fi
         id: commit
