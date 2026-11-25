@@ -74,8 +74,12 @@ def _evi_composite(lat: float, lon: float, as_of: "_dt.date",
         stamped = col.map(lambda i: i.addBands(
             ee.Image(ee.Number(i.get("system:time_start"))).toDouble().rename("t").updateMask(i.mask())))
         # reduce() drops the MODIS grid; restore it so we sample the same 250 m pixel as the default path
-        info = stamped.reduce(ee.Reducer.firstNonNull()).reproject(col.first().projection()).reduceRegion(
-            reducer=ee.Reducer.first(), geometry=point, scale=250).getInfo() or {}
+        merged = stamped.reduce(ee.Reducer.firstNonNull()).reproject(col.first().projection())
+        info = merged.reduceRegion(reducer=ee.Reducer.first(), geometry=point, scale=250).getInfo() or {}
+        if info.get("EVI_first") is None:
+            # The 250 m read (the training definition) resamples the ~232 m grid and can drop the
+            # mask at edge pixels (lakes, coast); only then read the native pixel.
+            info = merged.reduceRegion(reducer=ee.Reducer.first(), geometry=point).getInfo() or {}
         if info.get("EVI_first") is None or info.get("t_first") is None:
             raise RuntimeError(f"GEE returned no valid EVI for {lat},{lon} in the 64 days to {as_of}")
         return float(info["EVI_first"]) * 0.0001, _dt.datetime.utcfromtimestamp(info["t_first"] / 1000.0).date()
