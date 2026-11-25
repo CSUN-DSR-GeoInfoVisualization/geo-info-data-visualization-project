@@ -4,7 +4,9 @@ All notable changes to FireScope are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The authoritative working notes live in
 [`docs/SESSION_HANDOFF.md`](docs/SESSION_HANDOFF.md).
 
-## [Unreleased]
+## [3.3-stable] — 2026-11-25
+
+Training-data integrity, failure alerting, and security hardening.
 
 ### Added
 - **Three-source, skill-weighted weather** for training rows: NOAA RTMA (2.5 km hourly analysis of
@@ -14,21 +16,17 @@ All notable changes to FireScope are documented here. The format is based on
   0.11); temperature and wind use RTMA with ERA5 then MERRA-2 as fallbacks. Error vs stations: humidity
   4.47 RH pts (ERA5 alone 6.20), temperature 0.59 °C (1.14), wind 1.98 m/s (3.34). A source that grossly
   disagrees with the other two is dropped for that feature; two disagreeing sources still reject the row.
-
-### Fixed
-- **Database out-of-memory crashes**: the 256 MB Postgres was OOM-killed 13 times (2026-11-20 and -25).
-  The boot cache warm no longer loads the multi-MB fire-history rows, and past-year fire history never
-  expires, so it is never recomputed and rewritten.
-- Manual (backfill) ingest runs no longer redeploy the API once per day processed; only the scheduled run
-  and promote runs deploy.
-- County risk: a failed weather batch no longer fans out into repeated Open-Meteo calls per county.
-- Failure digest subject reads "since the last report" (the shutdown flush is not hourly).
-
-## [3.3-stable] — 2026-11-25
-
-Training-data integrity, failure alerting, and security hardening.
-
-### Added
+- **Weather App Plan data path**: daily ingest and the offline backfill (`ml/backfill_matched.py`) pick
+  fires with one shared function (one detection per ~5 km cell per day, seeded shuffle), screen static
+  heat sources (refineries, plants; 168 cells from FIRMS archive type-2 detections), and keep complete
+  fire/control pairs only. Backfilled rows use FIRMS archive vegetation fires only (type 0).
+- **Weather App Plan dataset** (`training_data/weather_app_plan/california_weatherapp.csv`): backfill
+  2018 → present plus re-graded rows; daily ingests are appended to it and to the original matched set.
+  Original training files are unchanged.
+- **Weekly training-data quality gate** (`POST /api/internal/ml/weather-skill`, `ml/weather_skill.py`):
+  scores RTMA, ERA5, MERRA-2 and the production blend against 22 stations, flags degradation, lost
+  sources, weight drift and unpaired recent fires, emails the details and fails the weekly run, which
+  blocks promotion.
 - **Matched-control training set** (`training_data/california_matched.csv`): every fire is paired with
   the same point on the same date one year earlier, with every time-varying feature backdated to that
   date. Replaces uniform-random no-fire points, which taught the model *where* fires happen (and
@@ -58,6 +56,15 @@ Training-data integrity, failure alerting, and security hardening.
 - Training-data stall watchdog fails the run red after 2 days without new data.
 
 ### Fixed
+- **Database out-of-memory crashes**: the 256 MB Postgres was OOM-killed 13 times (2026-11-20 and -25).
+  The boot cache warm no longer loads the multi-MB fire-history rows, and past-year fire history never
+  expires, so it is never recomputed and rewritten.
+- Manual (backfill) ingest runs no longer redeploy the API once per day processed; only the scheduled run
+  and promote runs deploy.
+- County risk: a failed weather batch no longer fans out into repeated Open-Meteo calls per county.
+- Failure digest subject reads "since the last report" (the shutdown flush is not hourly).
+- A data push rejected because `main` moved during the run dropped that run's rows; the push now
+  rebases and retries.
 - **Daily ingest stopped on 2026-11-06**: the NASA FIRMS S-NPP NRT feed went empty; switched to
   VIIRS NOAA-20.
 - Ingest rows could silently carry interpolated EVI/KBDI when a live source failed; 11 such rows from

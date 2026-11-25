@@ -136,34 +136,31 @@ jobs:
 
           if not rows:
               raise SystemExit(0)
-          path = "backend/ml/training_data/california_matched.csv"
-          exists = os.path.exists(path)
-          # Dedup: a >=2-day FIRMS window re-returns detections already captured on
-          # a previous run, so append only rows whose (lat, lon, acq_date) is not
-          # already in the committed dataset. Without this, widening the window
-          # would double-count every fire across overlapping days.
-          seen = set()
-          if exists:
-              with open(path, newline="") as f:
-                  for r in csv.DictReader(f):
-                      seen.add((r.get("lat"), r.get("lon"), r.get("acq_date")))
-          new_rows = []
-          for r in rows:
-              key = (str(r.get("lat")), str(r.get("lon")), str(r.get("acq_date")))
-              if key in seen:
-                  continue
-              seen.add(key)
-              new_rows.append(r)
-          print(f"ingest returned {len(rows)} rows; {len(new_rows)} new after dedup")
-          if not new_rows:
-              raise SystemExit(0)
-          with open(path, "a", newline="") as f:
-              w = csv.DictWriter(f, fieldnames=cols)
-              if not exists:
-                  w.writeheader()
-              for r in new_rows:
-                  w.writerow({c: r.get(c) for c in cols})
-          print(f"appended {len(new_rows)} rows -> {path}")
+          # Daily rows go to both datasets: the original matched set and the Weather
+          # App Plan set. Each is de-duplicated on its own (lat, lon, acq_date): a
+          # >=2-day FIRMS window re-returns detections already captured.
+          for path in ("backend/ml/training_data/california_matched.csv",
+                       "backend/ml/training_data/weather_app_plan/california_weatherapp.csv"):
+              os.makedirs(os.path.dirname(path), exist_ok=True)
+              exists = os.path.exists(path)
+              seen = set()
+              if exists:
+                  with open(path, newline="") as f:
+                      for r in csv.DictReader(f):
+                          seen.add((r.get("lat"), r.get("lon"), r.get("acq_date")))
+              new_rows = []
+              for r in rows:
+                  key = (str(r.get("lat")), str(r.get("lon")), str(r.get("acq_date")))
+                  if key not in seen:
+                      seen.add(key)
+                      new_rows.append(r)
+              with open(path, "a", newline="") as f:
+                  w = csv.DictWriter(f, fieldnames=cols)
+                  if not exists:
+                      w.writeheader()
+                  for r in new_rows:
+                      w.writerow({c: r.get(c) for c in cols})
+              print(f"ingest returned {len(rows)} rows; appended {len(new_rows)} new -> {path}")
           PY
 
       - name: Gated retrain
@@ -185,6 +182,7 @@ jobs:
           # on days with dropped rows). That regression silently dropped every
           # daily commit from 2026-06-20 on. Separate adds avoid it.
           git add backend/ml/training_data/california_matched.csv || true
+          git add backend/ml/training_data/weather_app_plan/california_weatherapp.csv || true
           [ -f backend/ml/training_data/quarantine.csv ] && git add backend/ml/training_data/quarantine.csv || true
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.promote }}" = "true" ]; then
             git add backend/ml/models/wildfire_model_predictive.pkl \

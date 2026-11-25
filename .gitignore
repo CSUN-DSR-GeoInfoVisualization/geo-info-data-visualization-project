@@ -45,6 +45,8 @@ backend/ml/training_data/*
 !backend/ml/training_data/california_matched.csv
 !backend/ml/training_data/quarantine.csv
 !backend/ml/training_data/static_heat_sources.csv
+!backend/ml/training_data/weather_app_plan/
+!backend/ml/training_data/weather_app_plan/*.csv
 backend/ml/charts/
 backend/ml/models/*_backup_*.pkl
 backend/ml/.appeears_task_id

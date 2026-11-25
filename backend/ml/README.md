@@ -40,6 +40,20 @@ The model is trained with **monotonic constraints** (`monotonic_cst=[0,1,1,-1,0,
 
 **Promotion gate.** Before any retrained candidate replaces the live model it must pass two checks (`retrain_and_gate.py`): (1) a hard PDP physical-direction check (`validate_monotonicity` sweeps each constrained feature across its range and requires it to move the correct direction), then (2) held-out AUROC and Brier must not regress versus the current model. A model that fails physics is never shipped, even if its raw accuracy looks higher.
 
+## Where the training data lives (`ml/training_data/`)
+
+| Location | What | Rows |
+|---|---|---|
+| `california_2020_kbdi.csv` | **Original** 2020 base set | 1,350 |
+| `california_daily.csv` | **Original** daily ingests, Jun–Nov 2026 (random no-fire points; not trained on) | 1,401 |
+| `california_matched.csv` | **Original** matched-control set: 2020 fires (2019 controls) + daily ingests from Nov 2026 | grows daily |
+| `weather_app_plan/california_weatherapp.csv` | **Weather App Plan** set: backfilled 2018 → present and re-graded rows, all built with the 3-source skill-weighted weather; daily ingests append here too | grows daily |
+| `quarantine.csv` | Rows rejected by the ingest gate, with reasons | — |
+| `static_heat_sources.csv` | 168 static heat-source cells (refineries, plants) screened from NRT fire labels | — |
+
+Every original file stays at the top level, unchanged; the Weather App Plan data has its own folder.
+Daily ingests are appended to both `california_matched.csv` and the Weather App Plan set.
+
 ## Data quality & continuous training
 
 The training set grows daily and the model self-updates weekly, both fully in GitHub Actions (no DB
