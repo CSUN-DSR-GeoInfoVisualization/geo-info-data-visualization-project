@@ -3,10 +3,12 @@ from flask_jwt_extended import create_access_token
 from email_validator import validate_email, EmailNotValidError
 from models import db, User, Role
 from config import Config
+from services.rate_limit import rate_limited, allow
 
 auth_bp = Blueprint('auth', __name__)
 
 @auth_bp.route('/register', methods=['POST'])
+@rate_limited('register', 10, 3600)
 def register():
     data = request.get_json() or {}
     email = data.get('email')
@@ -22,10 +24,9 @@ def register():
     except EmailNotValidError as e:
         return jsonify({'error': str(e)}), 400
 
-    # Supreme admins auto-promoted; others pick Researcher or default Resident
-    if email.lower() in [e.lower() for e in Config.SUPREME_ADMINS]:
-        role_name = 'Admin'
-    elif requested_role == 'Researcher':
+    # Never Admin at signup: there is no email verification, so anyone could
+    # register an unclaimed supreme-admin address. Admins promote via /assign-role.
+    if requested_role == 'Researcher':
         role_name = 'Researcher'
     else:
         role_name = 'Resident'
@@ -43,12 +44,16 @@ def register():
     return jsonify({'message': 'User registered', 'user': {'id': user.id, 'email': user.email, 'role': role.name}}), 201
 
 @auth_bp.route('/login', methods=['POST'])
+@rate_limited('login', 20, 300)
 def login():
     data = request.get_json() or {}
     email = data.get('email')
     password = data.get('password')
     if not email or not password:
         return jsonify({'error': 'Email and password required'}), 400
+    # Per-account cap too, so rotating IPs can't brute-force one password.
+    if not allow(f'login-email:{str(email).lower()}', 10, 900):
+        return jsonify({'error': 'too many attempts for this account, try again later'}), 429
     user = User.query.filter_by(email=email).join(Role).first()
     if not user or not user.verify_password(password):
         return jsonify({'error': 'Invalid credentials'}), 401

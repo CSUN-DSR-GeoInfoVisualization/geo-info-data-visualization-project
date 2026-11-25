@@ -97,6 +97,10 @@ def _warm_zone_risk_cache_on_boot(app):
 
 
 def create_app(config_class=Config):
+    # config.py falls back to published 'dev' secrets; with those anyone could forge
+    # login tokens, so production refuses to start without real ones.
+    if os.getenv('FLASK_ENV') == 'production' and not (os.getenv('SECRET_KEY') and os.getenv('JWT_SECRET_KEY')):
+        raise RuntimeError('SECRET_KEY and JWT_SECRET_KEY must be set in production')
     app = Flask(__name__)
     app.config.from_object(config_class)
 
@@ -151,13 +155,12 @@ def create_app(config_class=Config):
     except Exception as e:
         app.logger.warning('endpoint_cache warm failed: %s', e)
 
-    # Initialize email service if RESEND_API_KEY is configured
-    if os.getenv('RESEND_API_KEY'):
-        try:
-            from services.email import init_email_service
-            init_email_service(app)
-        except Exception as e:
-            app.logger.warning(f"Email service not initialized: {e}")
+    # services/email is NOT initialised (security fix 2026-11-25). Its blueprint
+    # had no authentication: /api/admin/alerts/send-test relayed branded email to
+    # any address, /api/admin/alerts/trigger pushed arbitrary alerts to users, and
+    # the user routes trusted a user_id parameter. Its scheduler jobs crashed on a
+    # schema the live table never had. Nothing called it; live alerts go through
+    # the token-protected /internal/alerts/* routes.
 
     @app.route('/health')
     def health():

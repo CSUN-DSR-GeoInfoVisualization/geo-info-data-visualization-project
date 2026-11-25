@@ -799,6 +799,9 @@ def prewarm_tiles():
     75s with 24 parallel workers. The cron can simply call this repeatedly
     to progressively warm more tiles — each call only fetches misses.
     """
+    import hmac, os
+    if not hmac.compare_digest(request.headers.get('X-Internal-Token', ''), os.getenv('INTERNAL_CRON_TOKEN') or '\0'):
+        return jsonify({'error': 'invalid X-Internal-Token'}), 401
     import time as _time
     start = _time.time()
     app_obj = current_app._get_current_object()

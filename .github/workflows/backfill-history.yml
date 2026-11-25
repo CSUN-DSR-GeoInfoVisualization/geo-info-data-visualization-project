@@ -40,6 +40,7 @@ jobs:
       - name: Backfill in 5-year chunks
         env:
           API_BASE: https://firescope-api.onrender.com/api
+          INTERNAL_CRON_TOKEN: ${{ secrets.INTERNAL_CRON_TOKEN }}
           FROM_YEAR: ${{ inputs.from_year || 1950 }}
           TO_YEAR:   ${{ inputs.to_year   || 2025 }}
           FORCE:     ${{ inputs.force     || 'false' }}
@@ -55,7 +56,7 @@ jobs:
             [ $end_year -gt $TO_YEAR ] && end_year=$TO_YEAR
             echo "===== Chunk $start_year..$end_year ====="
             t0=$(date +%s)
-            http=$(curl -s -X POST -o /tmp/chunk.json -w '%{http_code}' --max-time 85 \
+            http=$(curl -s -X POST -H "X-Internal-Token: $INTERNAL_CRON_TOKEN" -o /tmp/chunk.json -w '%{http_code}' --max-time 85 \
               "$API_BASE/history/admin/backfill-years?from_year=${start_year}&to_year=${end_year}&type=both&force=${FORCE}")
             elapsed=$(( $(date +%s) - t0 ))
             if [ "$http" != "200" ]; then

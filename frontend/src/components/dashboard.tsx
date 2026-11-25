@@ -6,7 +6,6 @@ import { RiskChart } from "./risk-chart";
 import { ActiveAlerts } from "./active-alerts";
 import { GoogleRiskMap, ActiveFiresMap } from "./GoogleRiskMap";
 import { SavedLocationsWidget } from "./saved-locations-widget";
-import { FIRMSMap } from "./FIRMSMap";
 import { NewsTicker } from "./news-ticker";
 import { apiFetch } from "../services/api";
 

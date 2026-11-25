@@ -4,6 +4,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests as http_requests
 from flask import Blueprint, request, jsonify
+from services.rate_limit import rate_limited
 from ml.inference import predict_from_features
 from data.sample_locations import SAMPLE_LOCATIONS
 
@@ -150,6 +151,7 @@ def _run(lat: float, lon: float) -> dict:
 
 
 @predict_bp.route('/predict', methods=['POST'])
+@rate_limited('predict', 60, 60)
 def predict_single():
     data = request.get_json() or {}
     lat = data.get('lat')
@@ -172,6 +174,8 @@ def predict_single():
 
 
 @predict_bp.route('/predict/batch', methods=['POST'])
+# Each item fetches live upstream data, so items (not requests) are counted.
+@rate_limited('predict-batch', 200, 3600, cost=lambda: len((request.get_json(silent=True) or {}).get('items') or []))
 def predict_batch():
     data = request.get_json() or {}
     items = data.get('items')
@@ -243,6 +247,7 @@ def calfire_incidents():
 
 
 @predict_bp.route('/predict-custom', methods=['POST'])
+@rate_limited('predict-custom', 60, 60)
 def predict_custom():
     """Predict risk from raw feature values (no location lookup)."""
     data = request.get_json() or {}

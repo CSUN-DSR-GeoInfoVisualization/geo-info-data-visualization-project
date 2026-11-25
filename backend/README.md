@@ -174,7 +174,7 @@ The API will be available at `http://localhost:5000`.
 | POST | `/api/me/locations` | JWT | Save a new location |
 | DELETE | `/api/me/locations/<id>` | JWT | Remove a saved location |
 
-> Alert endpoints under `routes/alerts.py` are not currently wired into `app.py` — alerts run in **UI-only mode** with preferences stored in `localStorage`. Re-enable by registering `alerts_bp` in `app.py` once the server-side flow is brought back online.
+> Alerts are sent by the token-protected `/api/internal/alerts/*` routes, driven by GitHub Actions crons. The legacy `routes/alerts.py` blueprint (unauthenticated) was removed in v3.3.
 
 ### Notifications
 

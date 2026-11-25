@@ -6,7 +6,7 @@
 
 [**Live site → firescope.dev**](https://firescope.dev) · [Architecture](docs/ARCHITECTURE.md) · [Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md)
 
-![live](https://img.shields.io/badge/live-firescope.dev-2d6cdf) ![release](https://img.shields.io/badge/release-v3.1--stable-2e8b57) ![risk model](https://img.shields.io/badge/risk_model-monotonic_HGB_+_physics_gate-b45309) ![license](https://img.shields.io/badge/license-MIT-555) ![CSUN](https://img.shields.io/badge/CSUN-ARCS_senior_project-c8102e)
+![live](https://img.shields.io/badge/live-firescope.dev-2d6cdf) ![release](https://img.shields.io/badge/release-v3.3--stable-2e8b57) ![risk model](https://img.shields.io/badge/risk_model-monotonic_HGB_+_physics_gate-b45309) ![license](https://img.shields.io/badge/license-MIT-555) ![CSUN](https://img.shields.io/badge/CSUN-ARCS_senior_project-c8102e)
 
 </div>
 
@@ -86,21 +86,30 @@ inverted, KBDI saturating).
 The model **loads once at startup** and is kept current by a **GitHub-Actions pipeline** with no
 database cost-risk (the dataset lives in-repo):
 
-- **Daily ingest** appends new FIRMS detections + sampled no-fire points, but only rows that pass a
-  multi-stage **data-quality gate**: physical-range/sanity checks, a low-confidence FIRMS label
-  filter, a California-land mask + active-NIFC-perimeter / 3-day fire-window check on no-fire points,
-  and **cross-source weather corroboration** (Open-Meteo vs MET Norway). Rejected rows are
-  quarantined, never trained on.
+- **Daily ingest** appends FIRMS (NOAA-20 VIIRS) detections from 6 days back, each paired with a
+  **matched control**: the same point on the same date one year earlier, so the model learns fire
+  *conditions* rather than fire *locations*. Every feature is observed (never forecast or
+  interpolated) and has a backup source measuring the same quantity; weather is **cross-referenced**
+  between two independent reanalyses (Open-Meteo/ERA5 vs NASA POWER/MERRA-2). Rows that fail the
+  data-quality gate (physical ranges, low-confidence labels, CA-land mask, cross-source agreement)
+  are quarantined, never trained on.
+- **Every failure is emailed to the owner**: an hourly digest of each data-source failure, fallback
+  and error the API logs; any failed workflow run; an ingest that returns only one class; and
+  training data that stops growing for 2 days.
 - **Weekly** the data is scanned for outliers + distribution drift (PSI), the live model is
   back-tested against recent real fires, and cached terrain is cross-checked — with email alerts.
-- **Weekly gated auto-promotion** retrains on the full rolling set and ships the new model only if it
-  clears the physics-hard + AUROC/Brier non-regression gate (manual promotion also available).
+- **Weekly gated retraining** evaluates a candidate against the physics-hard + AUROC/Brier
+  non-regression gate on a leak-free holdout. Auto-promotion is currently **held in dry-run** while
+  the first matched-control model is reviewed; promotion is manual (`promote=true`).
 
 Details in [`backend/ml/README.md`](backend/ml/README.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Data sources
 
-- **Satellite** — NASA FIRMS (VIIRS SNPP), NASA ORNL DAAC MODIS MOD13Q1 (EVI)
+- **Satellite** — NASA FIRMS (VIIRS NOAA-20; the S-NPP feed went dark Nov 2026), MODIS MOD13Q1 EVI
+  via Google Earth Engine with NASA ORNL DAAC as backup
+- **Weather (training)** — Open-Meteo archive (ERA5) cross-referenced with NASA POWER (MERRA-2);
+  drought (KBDI) from NASA POWER with Open-Meteo as backup
 - **Fire agencies** — CAL FIRE Incidents & Historic Perimeters, NIFC WFIGS, CAL FIRE DINS damage
   (132,000+ structures, 2013→present)
 - **Emergency management** — Cal OES `CA_EVACUATIONS_PROD` (Genasys PROTECT + county feeds),
@@ -200,8 +209,8 @@ cost-risk) and a candidate only ships if it survives a physics-direction gate:
 ```mermaid
 %%{init: {'themeVariables': {'edgeLabelBackground': '#ffffff'}, 'themeCSS': '.edgeLabel rect{opacity:1 !important;fill:#ffffff !important;} .edgeLabel,.edgeLabel p,.edgeLabel span,.edgeLabel div{background-color:#ffffff !important;color:#16181d !important;}'}}%%
 flowchart LR
-    F["FIRMS detections<br/>+ matched no-fire points"] --> EN["enrich via get_feature<br/>same spine as production"]
-    EN --> DS["append to in-repo dataset<br/>california_daily.csv"]
+    F["FIRMS detections (6 days back)<br/>+ same-point controls 1 year earlier"] --> EN["observed features<br/>backup source per feature<br/>ERA5 vs MERRA-2 cross-check"]
+    EN --> DS["append to in-repo dataset<br/>california_matched.csv"]
     DS --> TR["train monotonic candidate"]
     TR --> G{"physics + metric gate"}
     G -->|pass| PR["archive old · promote .pkl"]
