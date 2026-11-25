@@ -89,8 +89,10 @@ database cost-risk (the dataset lives in-repo):
 - **Daily ingest** appends FIRMS (NOAA-20 VIIRS) detections from 6 days back, each paired with a
   **matched control**: the same point on the same date one year earlier, so the model learns fire
   *conditions* rather than fire *locations*. Every feature is observed (never forecast or
-  interpolated) and has a backup source measuring the same quantity; weather is **cross-referenced**
-  between two independent reanalyses (Open-Meteo/ERA5 vs NASA POWER/MERRA-2). Rows that fail the
+  interpolated) and has a backup source measuring the same quantity; weather combines **three
+  sources weighted by their measured accuracy** against weather stations, the way the NWS National
+  Blend weights models: NOAA RTMA (station-based analysis), ERA5 and MERRA-2. A source that grossly
+  disagrees with the other two is dropped. Rows that fail the
   data-quality gate (physical ranges, low-confidence labels, CA-land mask, cross-source agreement)
   are quarantined, never trained on.
 - **Every failure is emailed to the owner**: an hourly digest of each data-source failure, fallback
@@ -108,7 +110,8 @@ Details in [`backend/ml/README.md`](backend/ml/README.md) and [docs/ARCHITECTURE
 
 - **Satellite** — NASA FIRMS (VIIRS NOAA-20; the S-NPP feed went dark Nov 2026), MODIS MOD13Q1 EVI
   via Google Earth Engine with NASA ORNL DAAC as backup
-- **Weather (training)** — Open-Meteo archive (ERA5) cross-referenced with NASA POWER (MERRA-2);
+- **Weather (training)** — NOAA RTMA via Earth Engine, Open-Meteo archive (ERA5) and NASA POWER
+  (MERRA-2), skill-weighted per feature;
   drought (KBDI) from NASA POWER with Open-Meteo as backup
 - **Fire agencies** — CAL FIRE Incidents & Historic Perimeters, NIFC WFIGS, CAL FIRE DINS damage
   (132,000+ structures, 2013→present)
@@ -209,7 +212,7 @@ cost-risk) and a candidate only ships if it survives a physics-direction gate:
 ```mermaid
 %%{init: {'themeVariables': {'edgeLabelBackground': '#ffffff'}, 'themeCSS': '.edgeLabel rect{opacity:1 !important;fill:#ffffff !important;} .edgeLabel,.edgeLabel p,.edgeLabel span,.edgeLabel div{background-color:#ffffff !important;color:#16181d !important;}'}}%%
 flowchart LR
-    F["FIRMS detections (6 days back)<br/>+ same-point controls 1 year earlier"] --> EN["observed features<br/>backup source per feature<br/>ERA5 vs MERRA-2 cross-check"]
+    F["FIRMS detections (6 days back)<br/>+ same-point controls 1 year earlier"] --> EN["observed features<br/>backup source per feature<br/>RTMA + ERA5 + MERRA-2 skill-weighted"]
     EN --> DS["append to in-repo dataset<br/>california_matched.csv"]
     DS --> TR["train monotonic candidate"]
     TR --> G{"physics + metric gate"}

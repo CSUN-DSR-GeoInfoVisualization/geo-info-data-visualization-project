@@ -4,6 +4,26 @@ All notable changes to FireScope are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The authoritative working notes live in
 [`docs/SESSION_HANDOFF.md`](docs/SESSION_HANDOFF.md).
 
+## [Unreleased]
+
+### Added
+- **Three-source, skill-weighted weather** for training rows: NOAA RTMA (2.5 km hourly analysis of
+  surface observations, via Earth Engine) joins ERA5 and MERRA-2. Per-feature weights come from measured
+  error against 212 station samples (15 ASOS airports + 7 independent USCRN sites, Jun–Nov 2026),
+  following the NWS National Blend of Models: humidity is blended (RTMA 0.55 / ERA5 0.33 / MERRA-2
+  0.11); temperature and wind use RTMA with ERA5 then MERRA-2 as fallbacks. Error vs stations: humidity
+  4.47 RH pts (ERA5 alone 6.20), temperature 0.59 °C (1.14), wind 1.98 m/s (3.34). A source that grossly
+  disagrees with the other two is dropped for that feature; two disagreeing sources still reject the row.
+
+### Fixed
+- **Database out-of-memory crashes**: the 256 MB Postgres was OOM-killed 13 times (2026-11-20 and -25).
+  The boot cache warm no longer loads the multi-MB fire-history rows, and past-year fire history never
+  expires, so it is never recomputed and rewritten.
+- Manual (backfill) ingest runs no longer redeploy the API once per day processed; only the scheduled run
+  and promote runs deploy.
+- County risk: a failed weather batch no longer fans out into repeated Open-Meteo calls per county.
+- Failure digest subject reads "since the last report" (the shutdown flush is not hourly).
+
 ## [3.3-stable] — 2026-11-25
 
 Training-data integrity, failure alerting, and security hardening.
