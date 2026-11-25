@@ -206,7 +206,11 @@ jobs:
         # A push made with GITHUB_TOKEN does NOT trigger other workflows, so the
         # commit above won't auto-fire sync-domain-deployment. workflow_dispatch
         # IS an allowed exception, so trigger it explicitly to reach Render/Netlify.
-        if: steps.commit.outputs.pushed == 'true'
+        # Only the scheduled run (once a day) and promote runs redeploy. Each deploy
+        # restarts the API (cold caches, boot-time cache warm against the 256 MB DB);
+        # a manual backfill of N days used to redeploy N times. Backfilled rows reach
+        # Render with the next scheduled run.
+        if: steps.commit.outputs.pushed == 'true' && (github.event_name == 'schedule' || inputs.promote)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh workflow run sync-domain-deployment.yml --repo "${{ github.repository }}"

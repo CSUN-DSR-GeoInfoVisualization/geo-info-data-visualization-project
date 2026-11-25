@@ -20,7 +20,7 @@ def test_digest_groups_repeats_and_emails_once(monkeypatch):
     failure_digest.flush()
     assert len(sent) == 1
     subject, body = sent[0]
-    assert subject.startswith("4 failures") and "(2 kinds)" in subject
+    assert subject.startswith("4 failures") and "(2 kinds)" in subject and "since the last report" in subject
     assert "x3  WARNING [data.live_weather] live wind lookup failed" in body
     assert "NASA POWER fetch failed" in body
     failure_digest.flush()

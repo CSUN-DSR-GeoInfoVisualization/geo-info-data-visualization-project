@@ -50,7 +50,7 @@ def flush():
     if len(items) > 60:
         body += f"\n\n... and {len(items) - 60} more kinds"
     from routes.ml_ingest import _send_alert_email
-    _, err = _send_alert_email(f"{total} failures/fallbacks ({len(items)} kinds) in the last hour", body)
+    _, err = _send_alert_email(f"{total} failures/fallbacks ({len(items)} kinds) since the last report", body)
     if err:
         logging.getLogger(__name__).error("failure digest email failed: %s", err)
 
