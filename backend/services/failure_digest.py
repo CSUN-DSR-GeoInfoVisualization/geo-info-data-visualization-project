@@ -38,6 +38,8 @@ class _Collector(logging.Handler):
             return  # never digest our own send failures (would loop)
         if record.name == "googleapiclient.http" and "before retry" in record.getMessage():
             return  # a retry in progress; if every retry fails, our own code logs the failure
+        if record.name == "urllib3.connectionpool" and "Connection pool is full" in record.getMessage():
+            return  # not a failure: the request succeeded, its connection just isn't kept for reuse
         try:
             msg = record.getMessage()
         except Exception:

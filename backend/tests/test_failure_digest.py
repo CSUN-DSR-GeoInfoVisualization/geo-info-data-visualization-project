@@ -45,3 +45,15 @@ def test_library_retry_in_progress_is_not_a_failure(monkeypatch):
     logging.getLogger("googleapiclient.http").warning("Sleeping 1.84 seconds before retry 1 of 5 for request: POST x, after 503")
     failure_digest.flush()
     assert sent == []
+
+
+def test_connection_pool_full_is_not_a_failure():
+    import logging
+    from services import failure_digest as fd
+    h = fd._Collector()
+    rec = logging.LogRecord("urllib3.connectionpool", logging.WARNING, __file__, 1,
+                            "Connection pool is full, discarding connection: %s. Connection pool size: %s",
+                            ("earthengine.googleapis.com", 10), None)
+    before = sum(fd._counts.values())
+    h.emit(rec)
+    assert sum(fd._counts.values()) == before
