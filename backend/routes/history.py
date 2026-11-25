@@ -107,9 +107,10 @@ def history_perimeters():
       year_from/year_to (ints)   — inclusive range.
       If neither is given, defaults to the last 5 years so the page loads fast.
 
-      min_acres (int, default 100) — drop sub-100-acre polygons for performance.
-                                     Each year has up to several thousand records
-                                     below this threshold that slow rendering.
+      min_acres (int, default 0) — optional size floor. Defaults to every fire:
+                                     a 100-acre floor hid ~70% of each year's fires
+                                     (2025: 113 of 521), including small fires that
+                                     destroyed homes. All sizes is ~1.5x the payload.
     """
     y = request.args.get('year')
     if y:
@@ -128,9 +129,9 @@ def history_perimeters():
         except Exception:
             year_to = time.gmtime().tm_year
     try:
-        min_acres = int(request.args.get('min_acres') or 100)
+        min_acres = int(request.args.get('min_acres') or 0)
     except Exception:
-        min_acres = 100
+        min_acres = 0
 
     where = f"YEAR_ >= {year_from} AND YEAR_ <= {year_to} AND GIS_ACRES >= {min_acres}"
     params = {
