@@ -23,6 +23,7 @@ import time
 
 import requests
 
+SP_ARCHIVE_END = dt.date(2026, 8, 31)
 FIRMS = "https://firms.modaps.eosdis.nasa.gov/api/area/csv/{key}/{src}/-124.48,32.53,-114.13,42.01/{days}/{date}"
 
 
@@ -40,7 +41,18 @@ def _app():
 def _firms_week(monday):
     """Vegetation-fire detections (type 0, conf n/h) for the 7 days from `monday`."""
     key = os.environ["FIRMS_MAP_KEY"]
-    src = "VIIRS_SNPP_SP" if monday < dt.date(2018, 4, 1) else "VIIRS_NOAA20_SP"
+    # The standard-processing archive lags ~3 months (ends 2026-08-31 as of
+    # 2026-11-25); newer weeks come from the NRT feed the daily ingest uses, which
+    # has no type field, so static sources are screened by the mask instead.
+    nrt = monday > SP_ARCHIVE_END
+    if nrt:
+        src = "VIIRS_NOAA20_NRT"
+    elif monday < dt.date(2012, 1, 20):   # before VIIRS: MODIS (1 km), from 2000-11
+        src = "MODIS_SP"
+    elif monday < dt.date(2018, 4, 1):
+        src = "VIIRS_SNPP_SP"
+    else:
+        src = "VIIRS_NOAA20_SP"
     out = []
     for start, days in ((monday, 5), (monday + dt.timedelta(days=5), 2)):
         for attempt in range(4):
@@ -53,7 +65,10 @@ def _firms_week(monday):
                     raise
                 time.sleep(10 * (attempt + 1))
         for row in csv.DictReader(io.StringIO(r.text)):
-            if row.get("type") == "0" and row.get("confidence") in ("n", "h"):
+            conf = row.get("confidence", "")
+            # VIIRS: l/n/h; MODIS: 0-100, where NASA treats < 30 as low confidence.
+            confident = int(conf) >= 30 if conf.isdigit() else conf in ("n", "h")
+            if (nrt or row.get("type") == "0") and confident:
                 out.append((float(row["latitude"]), float(row["longitude"]), row["acq_date"]))
     return out
 
@@ -69,7 +84,10 @@ def fill(args):
                 done.add(r["week"])
     new_file = not os.path.exists(args.out)
     f = open(args.out, "a", newline="")
-    w = csv.DictWriter(f, fieldnames=["week"] + mi.ROW_COLS)
+    # sensor/pixel_m are provenance, never model inputs (the trainer selects
+    # FEATURE_COLS by name): a MODIS detection locates a fire within a ~1 km pixel,
+    # VIIRS within ~375 m, so the two are different-quality labels.
+    w = csv.DictWriter(f, fieldnames=["week"] + mi.ROW_COLS + ["sensor", "pixel_m"])
     if new_file:
         w.writeheader()
     stats = {"pairs": 0, "fail": 0, "mismatch": 0, "quality": 0}
@@ -104,14 +122,17 @@ def fill(args):
                         stats["fail"] += 1
                         break
                     row = {"lat": round(lat, 5), "lon": round(lon, 5), "acq_date": date, **feats,
-                           "fire": label, "source": "firms_viirs" if label else "matched_control"}
+                           "fire": label, "source": (("firms_modis" if monday < dt.date(2012, 1, 20) else "firms_viirs")
+                                                     if label else "matched_control")}
                     if mi._row_quality_issue(row):
                         stats["quality"] += 1
                         break
                     rows.append(row)
-                if len(rows) == 2:  # complete pairs only
+                if len(rows) == 2:  # complete pairs only; the control inherits its fire's sensor
+                    modis = monday < dt.date(2012, 1, 20)
                     for row in rows:
-                        w.writerow({"week": wk, **{c: row.get(c) for c in mi.ROW_COLS}})
+                        w.writerow({"week": wk, **{c: row.get(c) for c in mi.ROW_COLS},
+                                    "sensor": "MODIS" if modis else "VIIRS", "pixel_m": 1000 if modis else 375})
                     pairs += 1
             f.flush()
             stats["pairs"] += pairs
