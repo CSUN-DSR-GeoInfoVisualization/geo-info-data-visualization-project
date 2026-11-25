@@ -168,7 +168,7 @@ def history_perimeters():
         cache_key=cache_key,
         ttl_seconds=1800,
         compute_fn=_compute,
-        db_freshness_seconds=30 * 86400,
+        db_freshness_seconds=_freshness(year_to),
         cache_control='public, max-age=86400, stale-while-revalidate=604800, immutable',
     )
 
@@ -238,9 +238,18 @@ def history_dins():
         cache_key=cache_key,
         ttl_seconds=3600,
         compute_fn=_compute,
-        db_freshness_seconds=30 * 86400,
+        db_freshness_seconds=_freshness(year),
         cache_control='public, max-age=86400, stale-while-revalidate=604800, immutable',
     )
+
+
+def _freshness(last_year):
+    """Past years never change, so their cached rows never expire. Recomputing one
+    rewrites a multi-MB row, and that write OOM-killed the 256 MB Postgres
+    (2026-11-25 11:26 UTC). Only ranges reaching the current year refresh monthly."""
+    if last_year is not None and last_year < time.gmtime().tm_year:
+        return 100 * 365 * 86400
+    return 30 * 86400
 
 
 @history_bp.route('/admin/backfill-years', methods=['POST'])
