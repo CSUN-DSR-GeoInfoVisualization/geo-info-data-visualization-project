@@ -15,6 +15,7 @@ import os
 import re
 import json
 import time
+import csv
 import random
 import logging
 
@@ -422,6 +423,42 @@ def _fetch_firms(days, date=""):
 
 
 
+_STATIC_SOURCES = None
+
+
+def _is_static_source(lat, lon):
+    """True near a known static heat source (refinery, plant, flare): a 0.01 deg
+    cell, or its neighbour, with FIRMS archive type-2 detections. Built by
+    `ml.backfill_matched static-mask`; the NRT feed has no type field."""
+    global _STATIC_SOURCES
+    if _STATIC_SOURCES is None:
+        path = os.path.join(os.path.dirname(__file__), "..", "ml", "training_data", "static_heat_sources.csv")
+        try:
+            with open(path, newline="") as f:
+                _STATIC_SOURCES = {(round(float(r["lat"]), 2), round(float(r["lon"]), 2)) for r in csv.DictReader(f)}
+        except FileNotFoundError:
+            logger.warning("static_heat_sources.csv missing; NRT fires are not screened for static sources")
+            _STATIC_SOURCES = set()
+    la, lo = round(lat, 2), round(lon, 2)
+    return any((round(la + i * 0.01, 2), round(lo + j * 0.01, 2)) in _STATIC_SOURCES
+               for i in (-1, 0, 1) for j in (-1, 0, 1))
+
+
+def _thin_detections(fires, n, seed):
+    """One detection per ~5 km cell per day (one fire spans many pixels), shuffled
+    with a fixed seed so the sample spreads across fires and days. Shared by the
+    daily ingest and ml.backfill_matched so both choose fires the same way.
+    Returns up to 4n candidates; callers stop at n accepted fires."""
+    seen, uniq = set(), []
+    for lat, lon, d in fires:
+        cell = (round(lat / 0.05), round(lon / 0.05), d)
+        if cell not in seen:
+            seen.add(cell)
+            uniq.append((lat, lon, d))
+    random.Random(seed).shuffle(uniq)
+    return uniq[: n * 4]
+
+
 @ml_ingest_bp.route("/internal/ml/ingest", methods=["POST"])
 def ingest():
     expected = os.getenv("INTERNAL_CRON_TOKEN", "")
@@ -454,7 +491,8 @@ def ingest():
     # daily feed, off-CA => no-fire in the 2020 base). One rule, both classes.
     fires_on_land = [f for f in fires if on_ca_land(f[0], f[1])]
     fires_off_land = len(fires) - len(fires_on_land)
-    fire_pts = fires_on_land[:MAX_FIRE_PER_RUN]
+    fire_pts = _thin_detections([f for f in fires_on_land if not _is_static_source(f[0], f[1])],
+                                MAX_FIRE_PER_RUN, seed=date)
 
     # No-fire rows are MATCHED CONTROLS: the SAME point, one year earlier.
     #
@@ -494,6 +532,8 @@ def ingest():
             nofire_pts = pts
         start = time.monotonic()
         for lat, lon, acq_date in pts:
+            if label and sum(r["fire"] for r in rows) >= MAX_FIRE_PER_RUN:
+                break
             if time.monotonic() - start > budget:
                 truncated = True
                 break
@@ -536,6 +576,10 @@ def ingest():
 
     # Per-class counts, so a collapsed no-fire class is visible in the response
     # instead of only showing up months later as a class-imbalanced training set.
+    # Complete pairs only (as in ml.backfill_matched): a fire whose control failed
+    # would otherwise enter training with no matched negative.
+    paired = {(r["lat"], r["lon"]) for r in rows if r["fire"] == 0}
+    rows = [r for r in rows if r["fire"] == 0 or (r["lat"], r["lon"]) in paired]
     n_fire = sum(1 for r in rows if r["fire"] == 1)
     return jsonify({"ok": True, "fires_seen": len(fires),
                     "fires_off_ca_land": fires_off_land,
@@ -801,6 +845,25 @@ def _send_alert_email(subject: str, message: str):
     except Exception as e:
         logger.warning("alert email failed: %s", e)
         return None, str(e)
+
+
+@ml_ingest_bp.route("/internal/ml/weather-skill", methods=["POST"])
+def weather_skill():
+    """Weekly quality gate: score each weather source and the production blend
+    against stations, and check that recent training rows are complete pairs.
+    Emails the owner and returns 200 with healthy=false when anything is off."""
+    import hmac
+    if not hmac.compare_digest(request.headers.get("X-Internal-Token", ""), os.getenv("INTERNAL_CRON_TOKEN") or "\0"):
+        return jsonify({"error": "invalid X-Internal-Token"}), 401
+    from ml.weather_skill import skill_report, dataset_report
+    date = request.args.get("date") or (datetime.utcnow() - timedelta(days=INGEST_LAG_DAYS + 1)).strftime("%Y-%m-%d")
+    report = {"weather": skill_report(date),
+              "dataset": dataset_report(os.path.join(os.path.dirname(__file__), "..", "ml", "training_data", "california_matched.csv"))}
+    problems = report["weather"]["problems"] + report["dataset"]["problems"]
+    report["healthy"] = not problems
+    if problems:
+        _send_alert_email("training data quality gate failed", json.dumps(report, indent=2, default=str))
+    return jsonify(report), 200
 
 
 @ml_ingest_bp.route("/internal/ml/alert", methods=["POST"])
