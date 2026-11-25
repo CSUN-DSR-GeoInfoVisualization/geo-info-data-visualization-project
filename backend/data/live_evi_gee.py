@@ -50,22 +50,36 @@ def _tile(lat: float, lon: float) -> tuple[Decimal, Decimal]:
     return Decimal(f"{round(lat, 2):.4f}"), Decimal(f"{round(lon, 2):.4f}")
 
 
-def _evi_composite(lat: float, lon: float, as_of: "_dt.date") -> tuple[float, "_dt.date"]:
+def _evi_composite(lat: float, lon: float, as_of: "_dt.date",
+                   newest_valid: bool = False) -> tuple[float, "_dt.date"]:
     """Scaled EVI from the newest MOD13Q1 composite at or before `as_of`, plus
     that composite's date. Shared by the live and historical entry points so
-    both compute the same quantity from the same product."""
+    both compute the same quantity from the same product.
+
+    newest_valid (live map only): the newest composite is masked (cloud, no
+    data) at some pixels; use the newest one in the last ~4 composites that has
+    a value there instead of failing. Training keeps the default until the
+    dataset is rebuilt, so all rows use one definition."""
     _ensure_ee_initialized()
     import ee
 
-    start = as_of - _dt.timedelta(days=32)
-    img = (
+    point = ee.Geometry.Point([lon, lat])
+    col = (
         ee.ImageCollection("MODIS/061/MOD13Q1")
-        .filterDate(start.isoformat(), as_of.isoformat())
+        .filterDate((as_of - _dt.timedelta(days=64 if newest_valid else 32)).isoformat(), as_of.isoformat())
         .select("EVI")
         .sort("system:time_start", False)
-        .first()
     )
-    point = ee.Geometry.Point([lon, lat])
+    if newest_valid:
+        stamped = col.map(lambda i: i.addBands(
+            ee.Image(ee.Number(i.get("system:time_start"))).toDouble().rename("t").updateMask(i.mask())))
+        # reduce() drops the MODIS grid; restore it so we sample the same 250 m pixel as the default path
+        info = stamped.reduce(ee.Reducer.firstNonNull()).reproject(col.first().projection()).reduceRegion(
+            reducer=ee.Reducer.first(), geometry=point, scale=250).getInfo() or {}
+        if info.get("EVI_first") is None or info.get("t_first") is None:
+            raise RuntimeError(f"GEE returned no valid EVI for {lat},{lon} in the 64 days to {as_of}")
+        return float(info["EVI_first"]) * 0.0001, _dt.datetime.utcfromtimestamp(info["t_first"] / 1000.0).date()
+    img = col.first()
     info = img.reduceRegion(reducer=ee.Reducer.first(), geometry=point, scale=250).getInfo()
     raw = info.get("EVI") if isinstance(info, dict) else None
     if raw is None:
@@ -112,7 +126,7 @@ def get_evi_live(lat: float, lon: float) -> float:
     if cached is not None and cached.composite_date >= cutoff:
         return float(cached.evi)
 
-    scaled, composite_date = _evi_composite(lat, lon, today)
+    scaled, composite_date = _evi_composite(lat, lon, today, newest_valid=True)
     try:
         db.session.merge(FeatureCacheEvi(
             tile_lat=tlat, tile_lon=tlon, evi=scaled,

@@ -128,6 +128,7 @@ def _fetch_30day_weather(lat: float, lon: float) -> list[tuple[float, float]]:
         try:
             resp = requests.get(_POWER_DAILY_URL, params=params, timeout=20)
             if resp.status_code == 429:
+                last_err = RuntimeError("429 rate limited")
                 time.sleep(5 * (attempt + 1))
                 continue
             resp.raise_for_status()
@@ -175,7 +176,12 @@ def get_kbdi(lat: float, lon: float) -> float:
     fall back to a sample-location value, matching the pattern used by
     get_weather / get_elevation / get_evi.
     """
-    series = _fetch_30day_weather(lat, lon)
+    try:
+        series = _fetch_30day_weather(lat, lon)                  # NASA POWER
+    except Exception as e:
+        # Same backup as get_kbdi_at; a measured value beats IDW from sample points.
+        logger.warning("POWER 30-day fetch failed @ %.3f,%.3f, using Open-Meteo archive: %s", lat, lon, e)
+        series = _spinup_open_meteo(lat, lon, datetime.utcnow().strftime("%Y-%m-%d"))
     r      = _r_for(lat, lon)
     return float(kbdi_final(series, r_annual_in=r, initial_kbdi=100.0))
 

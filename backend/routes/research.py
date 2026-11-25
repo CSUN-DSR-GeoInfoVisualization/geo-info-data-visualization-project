@@ -447,7 +447,7 @@ def fire_data():
         try:
             url = (
                 f"{FIRMS_BASE}/{FIRMS_MAP_KEY}/VIIRS_SNPP_NRT"
-                f"/-124,32,-114,42/{days}/2025-01-01"
+                f"/-124,32,-114,42/{min(days, 10)}"  # NRT area API: the last 1-10 days
             )
             r = requests.get(url, timeout=30)
             r.raise_for_status()

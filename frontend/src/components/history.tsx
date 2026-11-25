@@ -281,6 +281,7 @@ const HistoricalFirePerimetersOverlay = memo(function HistoricalFirePerimetersOv
                 {selectedFire.GIS_ACRES != null && <div><strong>Acres:</strong> {Number(selectedFire.GIS_ACRES).toLocaleString(undefined, { maximumFractionDigits: 1 })}</div>}
                 {selectedFire.AGENCY && <div><strong>Agency:</strong> {selectedFire.AGENCY}</div>}
                 {selectedFire.UNIT_ID && <div><strong>Unit:</strong> {selectedFire.UNIT_ID}</div>}
+                {selectedFire.SOURCE && <div><strong>Source:</strong> {selectedFire.SOURCE}{selectedFire.YEAR_SOURCE ? ` (year ${selectedFire.YEAR_SOURCE})` : ''}</div>}
                 {selectedFire.ALARM_DATE && (
                   <div><strong>Start:</strong> {new Date(selectedFire.ALARM_DATE).toLocaleDateString()}</div>
                 )}
@@ -612,6 +613,7 @@ export function History() {
   const [searchQuery, setSearchQuery] = useState("");
   const [focusedFireKey, setFocusedFireKey] = useState<string | null>(null);
   const [selectedFire, setSelectedFire] = useState<any>(null);
+  const [yearNote, setYearNote] = useState<string | null>(null); // e.g. a year with no mapped fires in any source
 
   // Display controls — both layers independently toggleable; DINS off by default
   // (30k+ points; user opts in). Perimeters always render filled at full opacity.
@@ -722,12 +724,14 @@ export function History() {
   //    viewed is instant. Backend caches each (year, min_acres) for 30 min,
   //    so cold years still come in fast on subsequent dashboard loads.
   const yearCacheRef = useRef<Map<number, any[]>>(new Map());
+  const yearNoteRef = useRef<Map<number, string | null>>(new Map());
   useEffect(() => {
     const year = selectedYears[0];
     if (!year) return;
 
     const cached = yearCacheRef.current.get(year);
     if (cached) {
+      setYearNote(yearNoteRef.current.get(year) ?? null);
       setAllFeatures(cached);
       setFireData({ type: 'FeatureCollection', features: cached });
       const totalFires = cached.length;
@@ -748,6 +752,8 @@ export function History() {
         if (cancelled) return;
         const feats: any[] = Array.isArray(data?.features) ? data.features : [];
         yearCacheRef.current.set(year, feats);
+        yearNoteRef.current.set(year, data?.note || null);
+        setYearNote(data?.note || null);
         setAllFeatures(feats);
         setFireData({ type: 'FeatureCollection', features: feats });
         const totalFires = feats.length;
@@ -1096,7 +1102,8 @@ export function History() {
                 <div className="flex items-start gap-2">
                   <AlertTriangle className="h-4 w-4 text-orange-500 mt-0.5" />
                   <p className="text-xs text-muted-foreground">
-                    Historical data may not include all incidents. Small fires under 10 acres may be excluded.
+                    {yearNote ? <><strong>{yearNote}</strong> </> : null}
+                    Every fire in CAL FIRE's record, plus fires found only in NIFC's interagency fire history. Fires never mapped by either agency cannot be shown.
                   </p>
                 </div>
               </div>

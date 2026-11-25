@@ -162,7 +162,7 @@ The API will be available at `http://localhost:5000`.
 |---|---|---|
 | GET | `/api/history/perimeters/years` | List of years available in the CAL FIRE FRAP dataset |
 | GET | `/api/history/dins?year=YYYY` | Fire-damaged structures (CAL FIRE DINS, 2013→) from the validated archive, with per-incident inspection tallies |
-| GET | `/api/history/perimeters?year=YYYY` | CAL FIRE FRAP historic perimeters (1878–present, every size; optional `min_acres`) |
+| GET | `/api/history/perimeters?year=YYYY` | CAL FIRE FRAP historic perimeters (1878–present, every size; optional `min_acres`) + NIFC-only fires from `data/fire_history/`; every feature has `SOURCE`; `note` for years with no mapped fires |
 | GET | `/api/history/dins` | CAL FIRE DINS structure-damage points |
 | GET | `/api/shelters` | FEMA National Shelter System points across California |
 | GET | `/api/news` | GNews wildfire articles |

@@ -62,7 +62,24 @@ Training-data integrity, failure alerting, and security hardening.
 - gunicorn runs with `--threads 8`, so a long ingest no longer stalls page loads.
 - Training-data stall watchdog fails the run red after 2 days without new data.
 
+### Added
+- **Fire-history supplement** (`backend/data/fire_history/`, `data.fire_history_archive`, weekly
+  `fire-history-sync.yml`): 2,475 California wildfires that are in NIFC's InterAgency Fire Perimeter History
+  but not CAL FIRE's record (e.g. Ralston 2007, Slinkard 2002, Fort Piute 1994, Saline 1984), each validated
+  (California land, not prescribed, not a duplicate of a CAL FIRE or NIFC record) and tagged with its source.
+  63 of CAL FIRE's 77 undated fires get their year from the matching NIFC record; the 20 early years with no
+  mapped fire in any source (1879–1904) are labelled as such.
+
 ### Fixed
+- **Live EVI**: the newest MODIS composite is masked at some pixels, so ~345 lookups an hour fell back to
+  interpolation; the live map now uses the newest valid composite per pixel (training unchanged).
+- **Live KBDI**: NASA POWER rate limits sent lookups to an interpolation fallback that returned 0 (no
+  drought) everywhere; it now falls back to Open-Meteo, as training already did, and logs the 429.
+- **Researcher fire data**: FIRMS was queried for a fixed January 2025 date that the NRT feed rejects, so the
+  layer returned no detections.
+- **Fire-alert cache reads** called `get_cached_data` without its required arguments and always fell through
+  to a live recompute.
+- Failure emails now include the exception behind `logger.exception` messages.
 - **History showed ~30% of recorded fires**: `/api/history/perimeters` defaulted to a 100-acre floor,
   hiding 10,453 of CAL FIRE's 23,334 perimeters (2025: 113 of 521), including small fires that destroyed
   homes. It now returns every recorded fire; with all sizes shown, 99.82% of fire-damaged structures link

@@ -39,9 +39,12 @@ class _Collector(logging.Handler):
         if record.name == "googleapiclient.http" and "before retry" in record.getMessage():
             return  # a retry in progress; if every retry fails, our own code logs the failure
         try:
-            msg = redact(record.getMessage())
+            msg = record.getMessage()
         except Exception:
-            msg = redact(str(record.msg))
+            msg = str(record.msg)
+        if record.exc_info and record.exc_info[1] is not None:  # logger.exception: say what actually failed
+            msg += f" ({type(record.exc_info[1]).__name__}: {record.exc_info[1]})"
+        msg = redact(msg)
         key = f"{record.levelname} [{record.name}] " + re.sub(r"-?\d+(\.\d+)?", "N", msg)[:180]
         with _lock:
             _counts[key] += 1
