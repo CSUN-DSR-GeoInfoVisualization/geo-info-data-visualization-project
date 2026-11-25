@@ -182,22 +182,22 @@ def _power_weather_for_date(lat, lon, date_str):
     get_weather key names, or None (POWER lags ~3 days and fills gaps with -999)."""
     import datetime as _dt
     import statistics
+    from data import nasa_power
+    from data.open_meteo import RateLimited
     t = _dt.datetime.strptime(date_str, "%Y-%m-%d")
-    params = {"parameters": "T2M,RH2M,WS10M_MAX", "community": "AG",
-              "latitude": lat, "longitude": lon, "format": "JSON",
-              "start": (t - _dt.timedelta(days=3)).strftime("%Y%m%d"),
-              "end": (t + _dt.timedelta(days=3)).strftime("%Y%m%d")}
+    lo, hi = (t - _dt.timedelta(days=3)).strftime("%Y%m%d"), (t + _dt.timedelta(days=3)).strftime("%Y%m%d")
     for attempt in range(3):
         try:
-            r = requests.get(_POWER_URL, params=params, timeout=20)
-            r.raise_for_status()
-            p = r.json()["properties"]["parameter"]
-            vals = {k: [v for v in p[k].values() if v != -999.0] for k in ("T2M", "RH2M", "WS10M_MAX")}
+            p = nasa_power.window(lat, lon, date_str)
+            vals = {k: [v for d, v in p[k].items() if lo <= d <= hi and v != -999.0]
+                    for k in ("T2M", "RH2M", "WS10M_MAX")}
             if not all(vals.values()):
                 return None
             return {"temperature_celsius": statistics.mean(vals["T2M"]),
                     "humidity": statistics.mean(vals["RH2M"]),
                     "wind_speed": statistics.mean(vals["WS10M_MAX"])}
+        except RateLimited:
+            raise  # never silently drop a weather source
         except Exception as e:
             if attempt == 2:
                 logger.warning("POWER weather failed @ %.3f,%.3f %s: %s", lat, lon, date_str, e)
