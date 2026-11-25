@@ -203,6 +203,94 @@ def _power_weather_for_date(lat, lon, date_str):
             time.sleep(3 * (attempt + 1))
 
 
+def _rtma_weather_for_date(lat, lon, date_str):
+    """NOAA RTMA (2.5 km hourly analysis of surface observations, the NWS
+    'analysis of record') via Earth Engine, over the same ±3-day Pacific-time
+    window and definitions as _weather_for_date. Get_weather key names, or None."""
+    import datetime as _dt
+    import math
+    import statistics
+    from collections import defaultdict
+    from zoneinfo import ZoneInfo
+    from data.live_evi_gee import _ensure_ee_initialized
+    try:
+        _ensure_ee_initialized()
+        import ee
+        t = _dt.datetime.strptime(date_str, "%Y-%m-%d")
+        rows = (ee.ImageCollection("NOAA/NWS/RTMA")
+                .filterDate((t - _dt.timedelta(days=3)).strftime("%Y-%m-%dT07:00:00"),
+                            (t + _dt.timedelta(days=4)).strftime("%Y-%m-%dT09:00:00"))
+                .select(["TMP", "DPT", "WIND"])
+                .getRegion(ee.Geometry.Point(lon, lat), 2500).getInfo())
+    except Exception as e:
+        logger.warning("RTMA weather failed @ %.3f,%.3f %s: %s", lat, lon, date_str, e)
+        return None
+    hdr, la = rows[0], ZoneInfo("America/Los_Angeles")
+    it, idp, iw, ims = hdr.index("TMP"), hdr.index("DPT"), hdr.index("WIND"), hdr.index("time")
+    lo, hi = (t - _dt.timedelta(days=3)).date(), (t + _dt.timedelta(days=3)).date()
+    days = defaultdict(lambda: ([], [], []))
+    for r in rows[1:]:
+        if None in (r[it], r[idp], r[iw]):
+            continue
+        day = _dt.datetime.fromtimestamp(r[ims] / 1000, _dt.timezone.utc).astimezone(la).date()
+        if lo <= day <= hi:
+            tc, td = r[it], r[idp]
+            days[day][0].append(tc)
+            days[day][1].append(100 * math.exp(17.625 * td / (243.04 + td)) / math.exp(17.625 * tc / (243.04 + tc)))
+            days[day][2].append(r[iw])
+    good = [v for v in days.values() if len(v[0]) >= 18]
+    if len(good) < 5:
+        return None
+    return {"temperature_celsius": statistics.mean(statistics.mean(v[0]) for v in good),
+            "humidity": statistics.mean(statistics.mean(v[1]) for v in good),
+            "wind_speed": statistics.mean(max(v[2]) for v in good)}
+
+
+class CrossSourceMismatch(Exception):
+    """Two weather sources disagree grossly and there is no third to break the tie."""
+
+
+# Per-feature weights, learned 2026-11-25 like the NWS National Blend: inverse
+# squared mean absolute error against 212 station samples (15 ASOS airports, 7
+# independent USCRN sites, Jun-Nov 2026), checked leaving whole sites out.
+# Humidity: the blend beats any single source (4.47 vs RTMA 4.82, ERA5 6.20 RH
+# pts). Temperature and wind: RTMA alone beats every blend (0.59 vs 0.65 C;
+# 1.98 vs 2.45 m/s), so the others are fallbacks only.
+WEATHER_WEIGHTS = {
+    "humidity": {"rtma": 0.55, "era5": 0.33, "merra2": 0.11},
+    "temperature_celsius": {"rtma": 1.0},
+    "wind_speed": {"rtma": 1.0},
+}
+WEATHER_FALLBACK = ("rtma", "era5", "merra2")
+# Gross-error tolerances, above the largest disagreement seen between sources
+# that each matched their station.
+WEATHER_TOL = {"temperature_celsius": 8.0, "humidity": 30.0, "wind_speed": 5.0}
+
+
+def _blend_weather(sources):
+    """sources: {name: {temperature_celsius, humidity, wind_speed}} for each
+    source that answered. With 3+ sources, one grossly off the median is dropped
+    for that feature; with 2 that disagree there is no tiebreak, so the point is
+    rejected. Returns (blended, notes)."""
+    import statistics
+    out, notes = {}, []
+    for k, tol in WEATHER_TOL.items():
+        vals = {s: v[k] for s, v in sources.items()}
+        if len(vals) >= 3:
+            med = statistics.median(vals.values())
+            for name in [n for n, x in vals.items() if abs(x - med) > tol]:
+                notes.append(f"{name} {k} outlier ({vals.pop(name):.1f} vs median {med:.1f})")
+        elif len(vals) == 2 and abs(max(vals.values()) - min(vals.values())) > tol:
+            raise CrossSourceMismatch(f"{k} disagree: " + ", ".join(f"{n}={x:.1f}" for n, x in vals.items())
+                                      + f" (>{tol}, no third source)")
+        w = {n: WEATHER_WEIGHTS[k].get(n, 0.0) for n in vals}
+        if sum(w.values()) > 0:
+            out[k] = sum(w[n] * vals[n] for n in vals) / sum(w.values())
+        else:
+            out[k] = vals[next(n for n in WEATHER_FALLBACK if n in vals)]
+    return out, notes
+
+
 def _features_for_date(lat, lon, date_str):
     """Like _features_for but with weather AT the given date (archive). Falls back
     to current weather if the archive has no data for that date yet.
@@ -242,21 +330,28 @@ def _features_for_historical(lat, lon, date_str):
 
     Every feature has a backup source measuring the same quantity, and the row is
     never filled with an interpolated value: if a feature has no source left, this
-    raises and the caller drops the point. Returns (features, second) where second
-    is the independent weather reading to cross-check against, or None when only
-    one weather source answered."""
+    raises and the caller drops the point. Weather comes from RTMA, ERA5 and
+    MERRA-2 fetched in parallel and combined by _blend_weather (which raises
+    CrossSourceMismatch). Returns (features, number of weather sources used)."""
     from data.live_evi_gee import get_evi_at
     from data.live_evi import get_evi_at_ornl
     from data.live_elevation import get_elevation
     from data.live_kbdi import get_kbdi_at
-    wx = _weather_for_date(lat, lon, date_str)              # Open-Meteo archive (ERA5)
-    power = _power_weather_for_date(lat, lon, date_str)     # NASA POWER (MERRA-2)
-    second = power if wx is not None else None
-    if wx is None:
-        if power is None:
-            raise RuntimeError(f"no weather from Open-Meteo archive or NASA POWER on {date_str}")
-        wx = {"air_temp_encoded": (power["temperature_celsius"] + 273.15) / 0.02,
-              "wind": power["wind_speed"], "humidity": power["humidity"]}
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        f_era5 = ex.submit(_weather_for_date, lat, lon, date_str)          # Open-Meteo archive (ERA5)
+        f_merra2 = ex.submit(_power_weather_for_date, lat, lon, date_str)  # NASA POWER (MERRA-2)
+        f_rtma = ex.submit(_rtma_weather_for_date, lat, lon, date_str)     # NOAA RTMA (stations)
+        era5 = f_era5.result()
+        sources = {"rtma": f_rtma.result(), "merra2": f_merra2.result(),
+                   "era5": era5 and {"temperature_celsius": era5["air_temp_encoded"] * 0.02 - 273.15,
+                                     "humidity": era5["humidity"], "wind_speed": era5["wind"]}}
+    sources = {n: v for n, v in sources.items() if v}
+    if not sources:
+        raise RuntimeError(f"no weather from RTMA, Open-Meteo archive or NASA POWER on {date_str}")
+    wx, notes = _blend_weather(sources)
+    if notes:
+        logger.warning("weather outlier dropped @ %.3f,%.3f %s: %s", lat, lon, date_str, "; ".join(notes))
     try:
         evi = get_evi_at(lat, lon, date_str)                # Earth Engine MOD13Q1
     except Exception as e:
@@ -264,43 +359,15 @@ def _features_for_historical(lat, lon, date_str):
         evi = get_evi_at_ornl(lat, lon, date_str)           # ORNL DAAC, same product
     return {
         "evi": float(evi),
-        "air_temp_encoded": wx["air_temp_encoded"],
-        "wind": wx["wind"],
+        "air_temp_encoded": (wx["temperature_celsius"] + 273.15) / 0.02,
+        "wind": wx["wind_speed"],
         "humidity": wx["humidity"],
         "elevation": float(get_elevation(lat, lon)),
         "kbdi": float(get_kbdi_at(lat, lon, date_str)),
-    }, second
+    }, len(sources)
 
 
-# Layer 2c — cross-source corroboration (INGEST ONLY; never the website path).
-# Compares Open-Meteo's archive (ERA5) against NASA POWER (MERRA-2): two
-# independent reanalyses, same ±3-day window, same definitions. (The previous
-# second source, MET Norway, was a current-hour reading compared against a 3-day
-# mean, so it dropped valid rows.) Tolerances sit above the largest disagreement
-# measured on 40 validated rows on 2026-11-25 (temp 5.1 C, RH 24.7 pts, wind
-# 3.2 m/s), so only gross errors are dropped. Fail-open when POWER is unavailable.
-CROSSCHECK_ENABLED = os.getenv("INGEST_CROSSCHECK", "1") != "0"
 INGEST_LAG_DAYS = 6
-XCHECK_TEMP_TOL = 8.0        # °C
-XCHECK_HUMIDITY_TOL = 30.0   # percentage points
-XCHECK_WIND_TOL = 5.0        # m/s
-
-
-def _weather_mismatch(row, second):
-    """Return a reason string if the primary and second weather sources grossly
-    disagree for this point, else None."""
-    primary_temp_c = row["air_temp_encoded"] * 0.02 - 273.15
-    checks = (
-        ("temperature", primary_temp_c, second.get("temperature_celsius"), XCHECK_TEMP_TOL),
-        ("humidity", row.get("humidity"), second.get("humidity"), XCHECK_HUMIDITY_TOL),
-        ("wind", row.get("wind"), second.get("wind_speed"), XCHECK_WIND_TOL),
-    )
-    for name, a, b, tol in checks:
-        if a is None or b is None:
-            continue
-        if abs(a - b) > tol:
-            return f"{name} disagree: primary={a:.1f} second={b:.1f} (>{tol})"
-    return None
 
 
 
@@ -411,7 +478,6 @@ def ingest():
     # negatives, not verified ones.
     boundaries_ok = bool(_county_features())
 
-    crosscheck = CROSSCHECK_ENABLED and request.args.get("crosscheck", "1") != "0"
     rows = []
     dropped = []
     cross_dropped = []
@@ -434,7 +500,11 @@ def ingest():
             if not acq_date:
                 continue
             try:
-                feats, second = _features_for_historical(lat, lon, acq_date)
+                feats, n_sources = _features_for_historical(lat, lon, acq_date)
+            except CrossSourceMismatch as e:
+                logger.warning("ingest row cross-source mismatch @ %.3f,%.3f: %s", lat, lon, e)
+                cross_dropped.append({"lat": round(lat, 5), "lon": round(lon, 5), "reason": str(e)})
+                continue
             except Exception as e:
                 logger.warning("feature fetch failed @ %.3f,%.3f: %s", lat, lon, e)
                 # Surfaced in the response: these failures were invisible without server logs.
@@ -452,18 +522,10 @@ def ingest():
                 logger.warning("ingest row dropped @ %.3f,%.3f: %s", lat, lon, issue)
                 dropped.append({"lat": row["lat"], "lon": row["lon"], "reason": issue})
                 continue
-            # Layer 2c: cross-source corroboration. Fail-open — a missing second
-            # source never discards the row; only a gross disagreement does.
-            if second is None:
+            if n_sources == 1:
                 single_source += 1
-            if crosscheck:
-                if second:
-                    cross_checked += 1
-                    mm = _weather_mismatch(row, second)
-                    if mm:
-                        logger.warning("ingest row cross-source mismatch @ %.3f,%.3f: %s", lat, lon, mm)
-                        cross_dropped.append({"lat": row["lat"], "lon": row["lon"], "reason": mm})
-                        continue
+            else:
+                cross_checked += 1
             rows.append(row)
 
     # quality_ok is informational for the caller/alerting: false when nothing
