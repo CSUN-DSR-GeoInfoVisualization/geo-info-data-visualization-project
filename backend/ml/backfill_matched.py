@@ -73,6 +73,9 @@ def _firms_week(monday):
     return out
 
 
+from data.open_meteo import RateLimited
+
+
 def fill(args):
     from routes import ml_ingest as mi
     from ml.geo_checks import on_ca_land
@@ -83,11 +86,15 @@ def fill(args):
             for r in csv.DictReader(f):
                 done.add(r["week"])
     new_file = not os.path.exists(args.out)
+    cols = ["week"] + mi.ROW_COLS + ["sensor", "pixel_m", "n_weather_sources"]
+    if not new_file:  # files started before n_weather_sources existed keep their header
+        with open(args.out, newline="") as f:
+            cols = next(csv.reader(f))
     f = open(args.out, "a", newline="")
     # sensor/pixel_m are provenance, never model inputs (the trainer selects
     # FEATURE_COLS by name): a MODIS detection locates a fire within a ~1 km pixel,
     # VIIRS within ~375 m, so the two are different-quality labels.
-    w = csv.DictWriter(f, fieldnames=["week"] + mi.ROW_COLS + ["sensor", "pixel_m"])
+    w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
     if new_file:
         w.writeheader()
     stats = {"pairs": 0, "fail": 0, "mismatch": 0, "quality": 0}
@@ -114,7 +121,10 @@ def fill(args):
                 rows = []
                 for label, date in ((1, d), (0, mi._prior_year(d))):
                     try:
-                        feats, _n = mi._features_for_historical(lat, lon, date)
+                        feats, n_src = mi._features_for_historical(lat, lon, date)
+                    except RateLimited:
+                        raise SystemExit(f"STOPPED at {wk}: a weather source is rate-limiting us; "
+                                         f"no rows written for this week. Rerun to resume.")
                     except mi.CrossSourceMismatch:
                         stats["mismatch"] += 1
                         break
@@ -122,6 +132,7 @@ def fill(args):
                         stats["fail"] += 1
                         break
                     row = {"lat": round(lat, 5), "lon": round(lon, 5), "acq_date": date, **feats,
+                           "n_weather_sources": n_src,
                            "fire": label, "source": (("firms_modis" if monday < dt.date(2012, 1, 20) else "firms_viirs")
                                                      if label else "matched_control")}
                     if mi._row_quality_issue(row):
@@ -132,7 +143,8 @@ def fill(args):
                     modis = monday < dt.date(2012, 1, 20)
                     for row in rows:
                         w.writerow({"week": wk, **{c: row.get(c) for c in mi.ROW_COLS},
-                                    "sensor": "MODIS" if modis else "VIIRS", "pixel_m": 1000 if modis else 375})
+                                    "sensor": "MODIS" if modis else "VIIRS", "pixel_m": 1000 if modis else 375,
+                                    "n_weather_sources": row["n_weather_sources"]})
                     pairs += 1
             f.flush()
             stats["pairs"] += pairs
@@ -175,14 +187,17 @@ def regrade(args):
     app = _app()
     with open(args.inp, newline="") as f:
         rows = list(csv.DictReader(f))
-        cols = list(rows[0].keys())
+        cols = list(rows[0].keys()) + (["n_weather_sources"] if "n_weather_sources" not in rows[0] else [])
     kept, dropped = [], []
     with app.app_context():
         for i, r in enumerate(rows):
             try:
                 feats, n = mi._features_for_historical(float(r["lat"]), float(r["lon"]), r["acq_date"])
-                r = {**r, "air_temp_encoded": feats["air_temp_encoded"], "wind": feats["wind"], "humidity": feats["humidity"]}
+                r = {**r, "air_temp_encoded": feats["air_temp_encoded"], "wind": feats["wind"], "humidity": feats["humidity"],
+                     "n_weather_sources": n}
                 kept.append(r)
+            except RateLimited:
+                raise SystemExit(f"STOPPED at row {i}: a weather source is rate-limiting us. Rerun regrade.")
             except Exception as e:
                 dropped.append((r, f"{type(e).__name__}: {e}"[:160]))
             if i % 50 == 0:

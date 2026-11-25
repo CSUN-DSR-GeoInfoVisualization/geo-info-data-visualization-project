@@ -49,11 +49,12 @@ def test_historical_never_invents_weather_when_every_source_fails(monkeypatch):
         ml_ingest._features_for_historical(37.8, -122.3, "2026-11-06")
 
 
-def test_single_source_is_used_and_counted(monkeypatch):
+def test_single_source_is_rejected(monkeypatch):
+    # One source has nothing to cross-check it against, so the point is dropped.
     _stub_static(monkeypatch)
     _sources(monkeypatch, None, POWER, None)
-    feats, n = ml_ingest._features_for_historical(37.8, -122.3, "2026-11-06")
-    assert n == 1 and feats["humidity"] == 45.0 and feats["wind"] == 3.5
+    with pytest.raises(RuntimeError, match="need 2"):
+        ml_ingest._features_for_historical(37.8, -122.3, "2026-11-06")
 
 
 def test_three_sources_use_measured_weights_and_ornl_backup(monkeypatch):
