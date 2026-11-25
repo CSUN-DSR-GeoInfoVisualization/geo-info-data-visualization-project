@@ -10,6 +10,17 @@ This document is the single source of truth for picking up FireScope work in a f
 
 ---
 
+## Since v3.3-stable (unreleased; next release follows the 2020–2026 training-data backfill)
+
+- Training weather is a **3-source skill-weighted blend** (NOAA RTMA + ERA5 + MERRA-2); weights in
+  `WEATHER_WEIGHTS` (`backend/routes/ml_ingest.py`), learned against station data — see CHANGELOG.
+- **Database**: the 256 MB Postgres OOM-crashed 13 times (deploy overlaps, multi-MB history writes).
+  Mitigated in code (boot warm skips history; past-year history never expires; backfill runs don't
+  redeploy). The durable fix is a larger plan (`basic-1gb`), pending a decision.
+- Gate status (2026-11-25, dry-run): holdout now 390 rows (203/187); REJECT — candidate AUROC 0.569 /
+  Brier 0.413 vs production 0.542 / 0.307. The holdout is November-only (mostly agricultural and
+  prescribed burns), so neither model is judged fairly yet; the 2020–2026 backfill adds every season.
+
 ## What v3.3-stable adds (on top of v3.2)
 
 A **training-data integrity, observability and security** release. See `CHANGELOG.md` for the full list.

@@ -50,12 +50,20 @@ cost-risk — the dataset lives in-repo). Every row is vetted before it can trai
   the whole ±3-day weather window is observed and present in both weather sources.
 - **Matched controls** — each accepted fire gets a control at the same lat/lon one year earlier, with
   every time-varying feature backdated to that date. Controls pair only with accepted fires.
-- **Backup per feature (same quantity)** — weather: Open-Meteo archive (ERA5) → NASA POWER (MERRA-2);
+- **Weather: three sources, skill-weighted** — NOAA RTMA (2.5 km hourly analysis of surface
+  observations, via Earth Engine), Open-Meteo archive (ERA5) and NASA POWER (MERRA-2), fetched in
+  parallel. Weights per feature come from measured error against 212 station samples (15 ASOS + 7
+  independent USCRN sites, Jun–Nov 2026, leave-one-site-out): humidity RTMA 0.55 / ERA5 0.33 /
+  MERRA-2 0.11; temperature and wind RTMA, falling back to ERA5 then MERRA-2 (`WEATHER_WEIGHTS` in
+  `routes/ml_ingest.py`). Mean error vs stations: humidity 4.47 RH pts (ERA5 alone 6.20), temperature
+  0.59 °C (1.14), wind 1.98 m/s (3.34).
+- **Backup per feature (same quantity)** — weather: any of the three sources;
   EVI: Earth Engine → ORNL DAAC (same MOD13Q1 composite rule); KBDI spinup: NASA POWER → Open-Meteo
   archive; elevation: USGS 3DEP → Open-Elevation. No source left → the point is dropped, never
   interpolated.
-- **Cross-reference** — ERA5 vs MERRA-2 weather must agree within 8 °C / 30 RH pts / 5 m/s (above the
-  largest disagreement measured on validated rows: 5.1 / 24.7 / 3.2); gross disagreement drops the row.
+- **Cross-reference** — with three sources, one more than 8 °C / 30 RH pts / 5 m/s from the median is
+  dropped for that feature and the row kept; with only two that disagree there is no tiebreak, so the
+  row is dropped.
 - **Range/sanity, label confidence, CA-land mask** as before.
 - Rejected rows are appended to `training_data/quarantine.csv` (committed) for review; per-point
   fetch failures are returned in the ingest response and printed in the workflow log.
