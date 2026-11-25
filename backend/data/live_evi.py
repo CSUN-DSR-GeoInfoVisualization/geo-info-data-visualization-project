@@ -98,3 +98,31 @@ def get_evi(lat: float, lon: float) -> float:
         raise ValueError("No valid EVI value found in MODIS response")
 
     return float(best_value) * 0.0001
+
+
+def get_evi_at_ornl(lat: float, lon: float, date_str: str) -> float:
+    """Newest MOD13Q1 EVI composite at or before `date_str`, from ORNL DAAC.
+
+    Backup for data.live_evi_gee.get_evi_at (Earth Engine): same product, same
+    "newest composite at or before the date" rule, so the value is the same
+    quantity. Raises if ORNL has no valid composite in the preceding 32 days."""
+    target = datetime.strptime(date_str, "%Y-%m-%d")
+    params = {
+        "latitude": lat, "longitude": lon, "band": "250m_16_days_EVI",
+        "startDate": _modis_date(target - timedelta(days=32)), "endDate": _modis_date(target),
+        "kmAboveBelow": 0, "kmLeftRight": 0,
+    }
+    for attempt in range(3):
+        try:
+            response = requests.get(_ORNL_DAAC_URL, params=params, timeout=20)
+            response.raise_for_status()
+            break
+        except Exception:
+            if attempt == 2:
+                raise
+            time.sleep(2 * (attempt + 1))
+    valid = [(e["calendar_date"], e["data"][0]) for e in response.json().get("subset", [])
+             if e.get("data") and _EVI_MIN <= e["data"][0] <= _EVI_MAX and e["calendar_date"] <= date_str]
+    if not valid:
+        raise ValueError(f"no valid ORNL EVI composite at or before {date_str}")
+    return float(max(valid)[1]) * 0.0001

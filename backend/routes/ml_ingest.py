@@ -19,12 +19,11 @@ import random
 import logging
 
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 from flask import Blueprint, request, jsonify
 
 from data.features import get_feature
 from data.live_weather import get_weather_daily
-from data.weather_crosscheck import get_weather_second
 from ml.geo_checks import on_ca_land, _county_features
 
 logger = logging.getLogger(__name__)
@@ -54,12 +53,11 @@ MAX_FIRE_PER_RUN = 15
 TIME_BUDGET_SECONDS = 60
 # Each class gets its OWN slice of the budget. Previously both shared one
 # deadline with fires processed first, so a busy fire day left nothing for the
-# negatives — they hit zero on 12 of 14 ingest days. Controls now get the larger
-# slice because they are the expensive class: a matched control needs archive
-# weather + a NASA POWER drought spinup + a GEE composite for its historical
-# date, roughly three times the work of a live fire row.
-FIRE_BUDGET_SECONDS = 20
-CONTROL_BUDGET_SECONDS = 40
+# negatives — they hit zero on 12 of 14 ingest days. Since every row is built
+# from historical data (fires 6 days back, controls a year before that), both
+# classes cost the same per point, so the split is even.
+FIRE_BUDGET_SECONDS = 30
+CONTROL_BUDGET_SECONDS = 30
 
 # Column order the workflow appends to california_daily.csv (must match the base
 # CSV header: the 6 features + label, plus provenance).
@@ -108,14 +106,17 @@ def _features_for(lat, lon):
     a defaulted or IDW-estimated value for another produces a row that looks clean
     to the range gate but isn't a real observation. If the fetch fails the caller
     drops the point rather than inventing a row."""
+    from data.live_evi_gee import get_evi_live
+    from data.live_elevation import get_elevation
+    from data.live_kbdi_cached import get_kbdi_cached
     wx = get_weather_daily(lat, lon)
     return {
-        "evi": float(get_feature(lat, lon, "evi")),
+        "evi": float(get_evi_live(lat, lon)),
         "air_temp_encoded": (float(wx["temperature_celsius"]) + 273.15) / 0.02,
         "wind": float(wx["wind_speed"]),
         "humidity": float(wx["humidity"]),
-        "elevation": float(get_feature(lat, lon, "elevation")),
-        "kbdi": float(get_feature(lat, lon, "kbdi")),
+        "elevation": float(get_elevation(lat, lon)),
+        "kbdi": float(get_kbdi_cached(lat, lon)),
     }
 
 
@@ -137,13 +138,21 @@ def _weather_for_date(lat, lon, date_str):
     # The archive rejects any end_date after today, which failed the whole lookup
     # for the last 3 days of dates; clamp to the newest day it holds.
     end = min(t + _dt.timedelta(days=3), _dt.datetime.utcnow() - _dt.timedelta(days=1)).strftime("%Y-%m-%d")
+    for attempt in range(3):
+        try:
+            r = requests.get(_ARCHIVE_URL, params={
+                "latitude": lat, "longitude": lon, "start_date": start, "end_date": end,
+                "daily": "wind_speed_10m_max,temperature_2m_mean,relative_humidity_2m_mean",
+                "wind_speed_unit": "ms", "timezone": "America/Los_Angeles",
+            }, timeout=15)
+            r.raise_for_status()
+            break
+        except Exception as e:
+            if attempt == 2:
+                logger.warning("archive weather failed @ %.3f,%.3f %s: %s", lat, lon, date_str, e)
+                return None
+            time.sleep(3 * (attempt + 1))
     try:
-        r = requests.get(_ARCHIVE_URL, params={
-            "latitude": lat, "longitude": lon, "start_date": start, "end_date": end,
-            "daily": "wind_speed_10m_max,temperature_2m_mean,relative_humidity_2m_mean",
-            "wind_speed_unit": "ms", "timezone": "America/Los_Angeles",
-        }, timeout=15)
-        r.raise_for_status()
         d = r.json().get("daily", {})
         winds = [v for v in d.get("wind_speed_10m_max", []) if v is not None]
         temps = [v for v in d.get("temperature_2m_mean", []) if v is not None]
@@ -158,6 +167,40 @@ def _weather_for_date(lat, lon, date_str):
         }
     except Exception:
         return None
+
+
+_POWER_URL = "https://power.larc.nasa.gov/api/temporal/daily/point"
+
+
+def _power_weather_for_date(lat, lon, date_str):
+    """NASA POWER (MERRA-2) weather over the same ±3-day window and with the same
+    definitions as _weather_for_date (ERA5): mean temperature, mean RH, mean of the
+    daily 10 m wind max. An independent reanalysis, so it serves both as the backup
+    when Open-Meteo fails and as the cross-reference when both answer. Returns the
+    get_weather key names, or None (POWER lags ~3 days and fills gaps with -999)."""
+    import datetime as _dt
+    import statistics
+    t = _dt.datetime.strptime(date_str, "%Y-%m-%d")
+    params = {"parameters": "T2M,RH2M,WS10M_MAX", "community": "AG",
+              "latitude": lat, "longitude": lon, "format": "JSON",
+              "start": (t - _dt.timedelta(days=3)).strftime("%Y%m%d"),
+              "end": (t + _dt.timedelta(days=3)).strftime("%Y%m%d")}
+    for attempt in range(3):
+        try:
+            r = requests.get(_POWER_URL, params=params, timeout=20)
+            r.raise_for_status()
+            p = r.json()["properties"]["parameter"]
+            vals = {k: [v for v in p[k].values() if v != -999.0] for k in ("T2M", "RH2M", "WS10M_MAX")}
+            if not all(vals.values()):
+                return None
+            return {"temperature_celsius": statistics.mean(vals["T2M"]),
+                    "humidity": statistics.mean(vals["RH2M"]),
+                    "wind_speed": statistics.mean(vals["WS10M_MAX"])}
+        except Exception as e:
+            if attempt == 2:
+                logger.warning("POWER weather failed @ %.3f,%.3f %s: %s", lat, lon, date_str, e)
+                return None
+            time.sleep(3 * (attempt + 1))
 
 
 def _features_for_date(lat, lon, date_str):
@@ -197,34 +240,50 @@ def _features_for_historical(lat, lon, date_str):
     today's EVI or KBDI would pair last year's wind with this year's drought and
     manufacture a row that never existed.
 
-    Elevation is static, so it is read normally. Raises if any historical fetch
-    fails; the caller drops the point rather than emitting a half-backdated row."""
-    wx = _weather_for_date(lat, lon, date_str)
-    if wx is None:
-        raise RuntimeError(f"no archive weather for {lat},{lon} on {date_str}")
+    Every feature has a backup source measuring the same quantity, and the row is
+    never filled with an interpolated value: if a feature has no source left, this
+    raises and the caller drops the point. Returns (features, second) where second
+    is the independent weather reading to cross-check against, or None when only
+    one weather source answered."""
     from data.live_evi_gee import get_evi_at
+    from data.live_evi import get_evi_at_ornl
+    from data.live_elevation import get_elevation
     from data.live_kbdi import get_kbdi_at
+    wx = _weather_for_date(lat, lon, date_str)              # Open-Meteo archive (ERA5)
+    power = _power_weather_for_date(lat, lon, date_str)     # NASA POWER (MERRA-2)
+    second = power if wx is not None else None
+    if wx is None:
+        if power is None:
+            raise RuntimeError(f"no weather from Open-Meteo archive or NASA POWER on {date_str}")
+        wx = {"air_temp_encoded": (power["temperature_celsius"] + 273.15) / 0.02,
+              "wind": power["wind_speed"], "humidity": power["humidity"]}
+    try:
+        evi = get_evi_at(lat, lon, date_str)                # Earth Engine MOD13Q1
+    except Exception as e:
+        logger.warning("GEE EVI failed @ %.3f,%.3f, using ORNL: %s", lat, lon, e)
+        evi = get_evi_at_ornl(lat, lon, date_str)           # ORNL DAAC, same product
     return {
-        "evi": float(get_evi_at(lat, lon, date_str)),
+        "evi": float(evi),
         "air_temp_encoded": wx["air_temp_encoded"],
         "wind": wx["wind"],
         "humidity": wx["humidity"],
-        "elevation": float(get_feature(lat, lon, "elevation")),
+        "elevation": float(get_elevation(lat, lon)),
         "kbdi": float(get_kbdi_at(lat, lon, date_str)),
-    }
+    }, second
 
 
 # Layer 2c — cross-source corroboration (INGEST ONLY; never the website path).
-# Compares the primary weather (Open-Meteo) against an independent second source
-# (MET Norway) per point and drops the row if they grossly disagree, catching a
-# plausible-but-wrong value that range/outlier checks can't see. Tolerances are
-# deliberately wide: two legitimate providers routinely differ (e.g. coastal
-# humidity by ~25 pts), so we only flag clearly-anomalous gaps, not normal model
-# disagreement. Fail-open: if the second source is unavailable the row is kept.
+# Compares Open-Meteo's archive (ERA5) against NASA POWER (MERRA-2): two
+# independent reanalyses, same ±3-day window, same definitions. (The previous
+# second source, MET Norway, was a current-hour reading compared against a 3-day
+# mean, so it dropped valid rows.) Tolerances sit above the largest disagreement
+# measured on 40 validated rows on 2026-11-25 (temp 5.1 C, RH 24.7 pts, wind
+# 3.2 m/s), so only gross errors are dropped. Fail-open when POWER is unavailable.
 CROSSCHECK_ENABLED = os.getenv("INGEST_CROSSCHECK", "1") != "0"
-XCHECK_TEMP_TOL = 12.0       # °C
-XCHECK_HUMIDITY_TOL = 40.0   # percentage points
-XCHECK_WIND_TOL = 15.0       # m/s
+INGEST_LAG_DAYS = 6
+XCHECK_TEMP_TOL = 8.0        # °C
+XCHECK_HUMIDITY_TOL = 30.0   # percentage points
+XCHECK_WIND_TOL = 5.0        # m/s
 
 
 def _weather_mismatch(row, second):
@@ -305,13 +364,13 @@ def ingest():
         return jsonify({"error": "invalid X-Internal-Token"}), 401
 
     days = int(request.args.get("days", 1))
-    # Optional backfill start date (YYYY-MM-DD): FIRMS window becomes [date, date+days).
-    date = request.args.get("date", "")
-    if date:
-        try:
-            datetime.strptime(date, "%Y-%m-%d")
-        except ValueError:
-            return jsonify({"error": "date must be YYYY-MM-DD"}), 400
+    # FIRMS window is [date, date+days). Default: INGEST_LAG_DAYS back, so the whole
+    # ±3-day weather window is observed (not forecast) and in both weather sources.
+    date = request.args.get("date") or (datetime.utcnow() - timedelta(days=INGEST_LAG_DAYS)).strftime("%Y-%m-%d")
+    try:
+        datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        return jsonify({"error": "date must be YYYY-MM-DD"}), 400
     try:
         fires, firms_lowconf = _fetch_firms(days, date)
     except Exception as e:
@@ -351,19 +410,22 @@ def ingest():
     # pixel within a year is unlikely (the fuel is gone), but these are assumed
     # negatives, not verified ones.
     boundaries_ok = bool(_county_features())
-    nofire_pts = [(la, lo, _prior_year(a)) for la, lo, a in fire_pts]
-    nofire_target = len(nofire_pts)
 
-    # Cross-check compares against CURRENT weather, so it is meaningless on backfill rows.
-    crosscheck = CROSSCHECK_ENABLED and request.args.get("crosscheck", "1") != "0" and not date
+    crosscheck = CROSSCHECK_ENABLED and request.args.get("crosscheck", "1") != "0"
     rows = []
     dropped = []
     cross_dropped = []
+    fetch_failed = []
     cross_checked = 0
+    single_source = 0
     truncated = False
 
-    for label, pts, budget in ((1, fire_pts, FIRE_BUDGET_SECONDS),
-                               (0, nofire_pts, CONTROL_BUDGET_SECONDS)):
+    for label, budget in ((1, FIRE_BUDGET_SECONDS), (0, CONTROL_BUDGET_SECONDS)):
+        # Controls pair with the fires actually accepted, so no control is orphaned.
+        pts = fire_pts if label else [(r["lat"], r["lon"], _prior_year(r["acq_date"]))
+                                      for r in rows if r["fire"] == 1]
+        if not label:
+            nofire_pts = pts
         start = time.monotonic()
         for lat, lon, acq_date in pts:
             if time.monotonic() - start > budget:
@@ -372,14 +434,12 @@ def ingest():
             if not acq_date:
                 continue
             try:
-                # Fires are today, so live features are the right ones. Controls
-                # are a year back and need every time-varying feature backdated.
-                # Live fires get live features; backfilled fires and controls are in
-                # the past, so every time-varying feature is backdated.
-                feats = (_features_for(lat, lon) if label and not date
-                         else _features_for_historical(lat, lon, acq_date))
+                feats, second = _features_for_historical(lat, lon, acq_date)
             except Exception as e:
                 logger.warning("feature fetch failed @ %.3f,%.3f: %s", lat, lon, e)
+                # Surfaced in the response: these failures were invisible without server logs.
+                fetch_failed.append({"fire": label, "lat": round(lat, 5), "lon": round(lon, 5),
+                                     "reason": f"{type(e).__name__}: {e}"[:200]})
                 continue
             row = {
                 "lat": round(lat, 5), "lon": round(lon, 5), "acq_date": acq_date,
@@ -394,8 +454,9 @@ def ingest():
                 continue
             # Layer 2c: cross-source corroboration. Fail-open — a missing second
             # source never discards the row; only a gross disagreement does.
+            if second is None:
+                single_source += 1
             if crosscheck:
-                second = get_weather_second(lat, lon)
                 if second:
                     cross_checked += 1
                     mm = _weather_mismatch(row, second)
@@ -418,12 +479,14 @@ def ingest():
                     "fires_off_ca_land": fires_off_land,
                     "firms_lowconf_dropped": firms_lowconf, "count": len(rows),
                     "fire_rows": n_fire, "nofire_rows": len(rows) - n_fire,
-                    "nofire_target": nofire_target, "nofire_sampled": len(nofire_pts),
+                    "nofire_target": len(nofire_pts), "nofire_sampled": len(nofire_pts),
                     "boundaries_ok": boundaries_ok,
                     "dropped": len(dropped), "dropped_detail": dropped[:20],
                     "cross_source_checked": cross_checked,
                     "cross_source_dropped": len(cross_dropped),
+                    "single_source_weather": single_source,
                     "cross_source_detail": cross_dropped[:20],
+                    "fetch_failed": len(fetch_failed), "fetch_failed_detail": fetch_failed[:20],
                     "quality_ok": quality_ok, "truncated": truncated,
                     "columns": ROW_COLS, "rows": rows}), 200
 
