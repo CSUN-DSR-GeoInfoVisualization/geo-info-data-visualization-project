@@ -22,14 +22,26 @@ _samples = {}
 _installed = False
 
 
+# Credentials that upstream error messages embed in URLs (query keys, FIRMS'
+# 32-character path key) must never reach an email.
+_SECRET = re.compile(r"((?:api_?key|key|token|access_token|map_key)=)[^&\s'\"]+", re.I)
+_PATH_KEY = re.compile(r"/[0-9a-f]{32}/")
+
+
+def redact(msg):
+    return _PATH_KEY.sub("/***/", _SECRET.sub(r"\1***", msg))
+
+
 class _Collector(logging.Handler):
     def emit(self, record):
         if record.name == __name__:
             return  # never digest our own send failures (would loop)
+        if record.name == "googleapiclient.http" and "before retry" in record.getMessage():
+            return  # a retry in progress; if every retry fails, our own code logs the failure
         try:
-            msg = record.getMessage()
+            msg = redact(record.getMessage())
         except Exception:
-            msg = str(record.msg)
+            msg = redact(str(record.msg))
         key = f"{record.levelname} [{record.name}] " + re.sub(r"-?\d+(\.\d+)?", "N", msg)[:180]
         with _lock:
             _counts[key] += 1
