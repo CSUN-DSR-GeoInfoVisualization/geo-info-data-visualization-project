@@ -655,9 +655,11 @@ def _compute_county_risk(evi_ov=None, air_temp_encoded_ov=None, wind_ov=None,
         sf = static_features.get(name, {"evi": evi_ov or 0.0, "elev": elev_ov or 0.0, "kbdi": kbdi_ov if kbdi_ov is not None else 200.0})
         evi, elev, kbdi = sf["evi"], sf["elev"], sf["kbdi"]
         wx   = live_weather.get(name)
-        air_temp_encoded = air_temp_encoded_ov if air_temp_encoded_ov is not None else (wx["air_temp_encoded"] if wx else get_feature(lat, lon, "air_temp_encoded"))
-        wind             = wind_ov             if wind_ov             is not None else (wx["wind"]             if wx else get_feature(lat, lon, "wind"))
-        humidity         = humidity_ov         if humidity_ov         is not None else (wx["humidity"]         if wx else get_feature(lat, lon, "humidity"))
+        # Batch weather failed for this county (usually a 429): interpolate directly
+        # rather than 3 more get_feature calls x 3 retries against the same limit.
+        air_temp_encoded = air_temp_encoded_ov if air_temp_encoded_ov is not None else (wx["air_temp_encoded"] if wx else _idw(lat, lon, "air_temp_encoded"))
+        wind             = wind_ov             if wind_ov             is not None else (wx["wind"]             if wx else _idw(lat, lon, "wind"))
+        humidity         = humidity_ov         if humidity_ov         is not None else (wx["humidity"]         if wx else _idw(lat, lon, "humidity"))
         quality.append("live" if (sf_present and wx) else "default")
         names.append(name)
         inputs.append((evi, air_temp_encoded, wind, humidity, elev, kbdi))
