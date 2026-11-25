@@ -94,7 +94,9 @@ database cost-risk (the dataset lives in-repo):
   Blend weights models: NOAA RTMA (station-based analysis), ERA5 and MERRA-2. A source that grossly
   disagrees with the other two is dropped. Rows that fail the
   data-quality gate (physical ranges, low-confidence labels, CA-land mask, cross-source agreement)
-  are quarantined, never trained on.
+  are quarantined, never trained on. Daily rows are appended to both the original matched set and
+  the **Weather App Plan** set (`backend/ml/training_data/weather_app_plan/`), which also holds the
+  2018 → present backfill built the same way.
 - **Every failure is emailed to the owner**: an hourly digest of each data-source failure, fallback
   and error the API logs; any failed workflow run; an ingest that returns only one class; and
   training data that stops growing for 2 days.

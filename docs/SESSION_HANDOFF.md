@@ -10,7 +10,14 @@ This document is the single source of truth for picking up FireScope work in a f
 
 ---
 
-## Since v3.3-stable (unreleased; next release follows the 2020–2026 training-data backfill)
+## v3.3-stable updates (2026-11-25, part of the release)
+
+- **Two datasets, one folder each** (`backend/ml/training_data/`): the original files stay at the top
+  level unchanged; the **Weather App Plan** set is `weather_app_plan/california_weatherapp.csv`
+  (backfill 2018 → present + re-graded rows, all 3-source weather). Daily ingests append to both.
+- Daily ingest and `ml/backfill_matched.py` select fires identically (shared thinning, static
+  heat-source screen, complete pairs only).
+- Weekly training-data quality gate: `POST /api/internal/ml/weather-skill` (in `weekly-promote.yml`).
 
 - Training weather is a **3-source skill-weighted blend** (NOAA RTMA + ERA5 + MERRA-2); weights in
   `WEATHER_WEIGHTS` (`backend/routes/ml_ingest.py`), learned against station data — see CHANGELOG.
