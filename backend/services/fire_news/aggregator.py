@@ -442,11 +442,21 @@ def _dedupe_by_url(articles: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return list(seen.values())
 
 
+# GNews' free tier allows 100 requests a day; the 15-minute news cache (reset by
+# every restart) exceeded it. GNews is called at most hourly and its last results
+# reused in between; a failed call (e.g. 429) also waits an hour before retrying.
+GNEWS_MIN_INTERVAL_SEC = 3600
+_gnews: dict[str, Any] = {"at": 0.0, "items": []}
+
+
 def _fetch_gnews() -> list[dict[str, Any]]:
     """Fetch California wildfire news from GNews API (free tier: 100 req/day)."""
     api_key = os.getenv("GNEWS_API_KEY", "")
     if not api_key:
         return []
+    if time.time() - _gnews["at"] < GNEWS_MIN_INTERVAL_SEC:
+        return list(_gnews["items"])
+    _gnews["at"] = time.time()
     out: list[dict[str, Any]] = []
     try:
         r = requests.get(
@@ -463,8 +473,10 @@ def _fetch_gnews() -> list[dict[str, Any]]:
         r.raise_for_status()
         data = r.json()
     except Exception as e:
-        logger.warning("GNews fetch failed: %s", e)
-        return out
+        # Log the status only: the exception text includes the URL with the API key.
+        status = getattr(getattr(e, "response", None), "status_code", type(e).__name__)
+        logger.warning("GNews fetch failed: %s (next attempt in %d min)", status, GNEWS_MIN_INTERVAL_SEC // 60)
+        return list(_gnews["items"])
     for item in data.get("articles", []):
         title = item.get("title", "")
         desc = item.get("description", "")
@@ -483,6 +495,7 @@ def _fetch_gnews() -> list[dict[str, Any]]:
         )
         if art:
             out.append(art)
+    _gnews["items"] = out
     return out
 
 
