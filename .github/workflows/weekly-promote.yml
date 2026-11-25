@@ -42,6 +42,18 @@ jobs:
           curl -s -X POST --max-time 60 -H "X-Internal-Token: $TOKEN" \
             "https://firescope-api.onrender.com/api/internal/ml/data-health?digest=1" || true
 
+      - name: Training-data quality gate (weather-source skill vs stations + recent pairs)
+        # Scores RTMA / ERA5 / MERRA-2 and the production blend against 22 stations,
+        # the way forecast blends re-check their inputs, and checks that recent
+        # training rows are complete fire/control pairs. The endpoint emails the
+        # details on any problem; this step then fails so the run goes red too.
+        env:
+          TOKEN: ${{ secrets.INTERNAL_CRON_TOKEN }}
+        run: |
+          curl -s -X POST --max-time 300 -H "X-Internal-Token: $TOKEN" \
+            https://firescope-api.onrender.com/api/internal/ml/weather-skill -o /tmp/skill.json
+          python3 -c "import json;r=json.load(open('/tmp/skill.json'));print(json.dumps({k:r[k] for k in ('healthy',)},indent=1));[print('PROBLEM:',p) for p in r['weather']['problems']+r['dataset']['problems']];print('blend MAE:',r['weather']['mae'].get('blend'));raise SystemExit(0 if r['healthy'] else 1)"
+
       - name: Backtest the live model on recent real fires (#5)
         env:
           TOKEN: ${{ secrets.INTERNAL_CRON_TOKEN }}
