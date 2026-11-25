@@ -252,7 +252,7 @@ export function SettingsPage({ defaultTab = "profile" }: SettingsPageProps) {
                   />
                   <AboutItem
                     name="CAL FIRE Historic Fire Perimeters (1878–present)"
-                    description="California's authoritative fire-perimeter archive — 22k+ polygons back to 1878. Powers the History page's year-by-year selector; fetched server-side via /api/history/perimeters?year=N with a 1-hour cache. Filter: GIS_ACRES ≥ 100."
+                    description="California's authoritative fire-perimeter archive — 23k+ polygons back to 1878, every recorded fire of any size. Powers the History page's year-by-year selector; fetched server-side via /api/history/perimeters?year=N with a 1-hour cache. Filter: GIS_ACRES ≥ 100."
                     badge="State agency"
                     badgeColor="bg-orange-100 text-orange-700"
                   />

@@ -63,6 +63,12 @@ Training-data integrity, failure alerting, and security hardening.
 - Training-data stall watchdog fails the run red after 2 days without new data.
 
 ### Fixed
+- **History showed ~30% of recorded fires**: `/api/history/perimeters` defaulted to a 100-acre floor,
+  hiding 10,453 of CAL FIRE's 23,334 perimeters (2025: 113 of 521), including small fires that destroyed
+  homes. It now returns every recorded fire; with all sizes shown, 99.82% of fire-damaged structures link
+  to a FRAP fire by name, complex name or location (the other 140 belong to fires CAL FIRE never mapped).
+- **GNews rate limit**: GNews (100 requests/day) was called on every 15-minute news refresh and after every
+  restart. It is now called at most hourly and backs off an hour after a failure.
 - **History → structure damage**: 41% of mapped points were undamaged inspections; the map now shows
   only fire-damaged structures. The popup read an address field the API never requested (always
   "Unknown address"); it now shows the address, damage level, the fire that caused it, that fire's
@@ -92,6 +98,8 @@ Training-data integrity, failure alerting, and security hardening.
   endpoints after it from warming.
 
 ### Security
+- The failure digest redacts credentials embedded in upstream error URLs (query keys and path keys) before
+  emailing; a library retry still in progress is no longer reported as a failure.
 - Removed a legacy, unwired-in-docs alert blueprint whose routes lacked authentication, and its
   scheduler (its jobs also failed on every run).
 - Admin cron endpoints now require the internal token.

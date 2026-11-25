@@ -18,6 +18,12 @@ This document is the single source of truth for picking up FireScope work in a f
 - Daily ingest and `ml/backfill_matched.py` select fires identically (shared thinning, static
   heat-source screen, complete pairs only).
 - Weekly training-data quality gate: `POST /api/internal/ml/weather-skill` (in `weekly-promote.yml`).
+- **History**: every recorded fire is shown (the 100-acre floor hid ~70%); structure damage comes from the
+  validated DINS archive `backend/data/dins/` (fire-damaged only; `dins-sync.yml` daily).
+- Failure digest redacts credentials; GNews is called at most hourly.
+- **Backfill tool** `ml/backfill_matched.py` covers 2001 → present (MODIS labels before 2012-01-20 with
+  `sensor`/`pixel_m` provenance, VIIRS after, NRT past the archive). Results are merged into
+  `weather_app_plan/` only after review.
 
 - Training weather is a **3-source skill-weighted blend** (NOAA RTMA + ERA5 + MERRA-2); weights in
   `WEATHER_WEIGHTS` (`backend/routes/ml_ingest.py`), learned against station data — see CHANGELOG.
