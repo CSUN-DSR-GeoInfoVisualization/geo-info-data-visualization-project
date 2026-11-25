@@ -18,6 +18,7 @@ on:
       - "Daily training ingest + gated retrain"
       - "Restart Render after backend deploy"
       - "Daily structure-damage sync"
+      - "Weekly fire-history sync"
     types: [completed]
 
 permissions:

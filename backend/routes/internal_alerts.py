@@ -2122,7 +2122,9 @@ def _fetch_active_fires() -> list:
     """Return the cached list of active CAL FIRE incidents (in-process)."""
     from services.cache import get_cached_data
     try:
-        cached = get_cached_data("calfire_incidents:false")
+        from routes.predict import _compute_calfire
+        cached = get_cached_data("calfire_incidents:false", 300, lambda: _compute_calfire("false"),
+                                 db_freshness_seconds=600)  # same settings as /api/calfire-incidents
         if cached and isinstance(cached, list):
             return cached
     except Exception as e:
@@ -2152,7 +2154,9 @@ def _fetch_nifc_perimeters() -> dict:
     """
     from services.cache import get_cached_data
     try:
-        cached = get_cached_data("fire_perimeters")
+        from routes.predict import _compute_nifc_perimeters
+        cached = get_cached_data("fire_perimeters", 180, _compute_nifc_perimeters,
+                                 db_freshness_seconds=900)  # same settings as /api/fire-perimeters
         if cached and isinstance(cached, dict) and "features" in cached:
             return cached
     except Exception as e:

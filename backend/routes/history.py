@@ -93,7 +93,10 @@ def history_perimeter_years():
         logger.warning('history years stat failed: %s', e)
         min_y, max_y = 1950, time.gmtime().tm_year
     years = list(range(max_y, min_y - 1, -1))  # newest first
-    payload = {'min': min_y, 'max': max_y, 'years': years}
+    from data import fire_history_archive
+    sup = fire_history_archive.load() or {}
+    payload = {'min': min_y, 'max': max_y, 'years': years,
+               'empty_years': sup.get('empty_years', []), 'undated_count': len(sup.get('undated', []))}
     _cache[cache_key] = (now, payload)
     return jsonify(payload)
 
@@ -141,7 +144,13 @@ def history_perimeters():
         'resultRecordCount': 4000,
         'orderByFields': 'GIS_ACRES DESC',
     }
-    cache_key = f"history_perimeters:{year_from}:{year_to}:{min_acres}"
+    # Past years never expire in the DB cache, so the key carries a fingerprint of
+    # this range's supplement records: a weekly sync that changes them changes the key.
+    import hashlib
+    from data import fire_history_archive
+    sup_ids = sorted(str(f['properties'].get('SOURCE_ID')) for f in fire_history_archive.features_for(year_from, year_to, min_acres))
+    sig = hashlib.sha1('|'.join(sup_ids).encode()).hexdigest()[:10]
+    cache_key = f"history_perimeters:v2:{sig}:{year_from}:{year_to}:{min_acres}"
 
     def _compute():
         try:
@@ -163,6 +172,12 @@ def history_perimeters():
             geom = f.get('geometry') or {}
             if 'coordinates' in geom:
                 geom['coordinates'] = _trunc(geom['coordinates'])
+            f.setdefault('properties', {})['SOURCE'] = 'CAL FIRE FRAP'
+        data.setdefault('features', []).extend(fire_history_archive.features_for(year_from, year_to, min_acres))
+        sup = fire_history_archive.load() or {}
+        empty = [y for y in sup.get('empty_years', []) if year_from <= y <= year_to]
+        if empty and not data['features']:
+            data['note'] = 'No mapped fire perimeters exist for this year in any source (CAL FIRE or NIFC).'
         return data
 
     from services.cache import serve_cached
