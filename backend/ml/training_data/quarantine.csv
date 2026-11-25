@@ -1,2 +1,5 @@
 lat,lon,reason
 33.85549,-118.33635,humidity disagree: primary=85.1 second=52.0 (>30.0)
+33.77711,-118.2387,humidity disagree: primary=86.0 second=49.5 (>30.0)
+33.81873,-118.24575,humidity disagree: primary=81.1 second=49.5 (>30.0)
+33.8556,-118.33392,humidity disagree: primary=85.3 second=49.5 (>30.0)
