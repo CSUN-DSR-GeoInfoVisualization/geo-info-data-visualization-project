@@ -73,7 +73,7 @@ jobs:
               data = json.dumps(body).encode() if body is not None else None
               req = urllib.request.Request(base + path, data=data, method="POST",
                   headers={"X-Internal-Token": token, "Content-Type": "application/json"})
-              return json.load(urllib.request.urlopen(req, timeout=130))
+              return json.load(urllib.request.urlopen(req, timeout=300))
 
           def alert(subject, message):
               try: post("/alert", {"subject": subject, "message": message})

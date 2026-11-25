@@ -53,12 +53,11 @@ MAX_FIRE_PER_RUN = 15
 TIME_BUDGET_SECONDS = 60
 # Each class gets its OWN slice of the budget. Previously both shared one
 # deadline with fires processed first, so a busy fire day left nothing for the
-# negatives — they hit zero on 12 of 14 ingest days. Controls now get the larger
-# slice because they are the expensive class: a matched control needs archive
-# weather + a NASA POWER drought spinup + a GEE composite for its historical
-# date, roughly three times the work of a live fire row.
-FIRE_BUDGET_SECONDS = 20
-CONTROL_BUDGET_SECONDS = 40
+# negatives — they hit zero on 12 of 14 ingest days. Since every row is built
+# from historical data (fires 6 days back, controls a year before that), both
+# classes cost the same per point, so the split is even.
+FIRE_BUDGET_SECONDS = 30
+CONTROL_BUDGET_SECONDS = 30
 
 # Column order the workflow appends to california_daily.csv (must match the base
 # CSV header: the 6 features + label, plus provenance).
@@ -411,8 +410,6 @@ def ingest():
     # pixel within a year is unlikely (the fuel is gone), but these are assumed
     # negatives, not verified ones.
     boundaries_ok = bool(_county_features())
-    nofire_pts = [(la, lo, _prior_year(a)) for la, lo, a in fire_pts]
-    nofire_target = len(nofire_pts)
 
     crosscheck = CROSSCHECK_ENABLED and request.args.get("crosscheck", "1") != "0"
     rows = []
@@ -423,8 +420,12 @@ def ingest():
     single_source = 0
     truncated = False
 
-    for label, pts, budget in ((1, fire_pts, FIRE_BUDGET_SECONDS),
-                               (0, nofire_pts, CONTROL_BUDGET_SECONDS)):
+    for label, budget in ((1, FIRE_BUDGET_SECONDS), (0, CONTROL_BUDGET_SECONDS)):
+        # Controls pair with the fires actually accepted, so no control is orphaned.
+        pts = fire_pts if label else [(r["lat"], r["lon"], _prior_year(r["acq_date"]))
+                                      for r in rows if r["fire"] == 1]
+        if not label:
+            nofire_pts = pts
         start = time.monotonic()
         for lat, lon, acq_date in pts:
             if time.monotonic() - start > budget:
@@ -478,7 +479,7 @@ def ingest():
                     "fires_off_ca_land": fires_off_land,
                     "firms_lowconf_dropped": firms_lowconf, "count": len(rows),
                     "fire_rows": n_fire, "nofire_rows": len(rows) - n_fire,
-                    "nofire_target": nofire_target, "nofire_sampled": len(nofire_pts),
+                    "nofire_target": len(nofire_pts), "nofire_sampled": len(nofire_pts),
                     "boundaries_ok": boundaries_ok,
                     "dropped": len(dropped), "dropped_detail": dropped[:20],
                     "cross_source_checked": cross_checked,
