@@ -6,6 +6,15 @@ All notable changes to FireScope are documented here. The format is based on
 
 ## [Unreleased]
 
+### In progress
+- Models A ("will a fire start here") and B ("will it grow large") with event-day fire weather and
+  random-spot controls: data build running (`ml.backfill_matched raw / spatial / growth-set`), then
+  station skill weights (`ml.event_skill`) and evaluation (`ml.train_ab`). Not live.
+
+## [3.4-stable] — 2026-11-26
+
+The 2001 → present training backfill is complete, and the model trained on it is live.
+
 ### Added
 - **2001 → present training set** (`backend/ml/training_data/weather_app_plan/california_weatherapp.csv`,
   29,196 rows): the matched fire / same-place-a-year-earlier design extended back to 2001 (MODIS 1 km
@@ -21,9 +30,14 @@ All notable changes to FireScope are documented here. The format is based on
   weather source per region.
 
 ### Changed
-- The trainer reads the 2001 → present set when present. Dry run 2026-11-26 on rows newer than the
-  production model: AUROC 0.598 / Brier 0.247 vs production 0.521 / 0.330 (the old matched set alone:
-  0.561 / 0.364). Not promoted.
+- The trainer reads the 2001 → present set when present. **Promoted 2026-11-26**: on 705 held-out
+  rows newer than the previous model, AUROC 0.594 / Brier 0.249 vs 0.521 / 0.328 for the model it
+  replaced (the old matched set alone: 0.561 / 0.364). Same six inputs, so the live map is unchanged.
+  Known limit: wind has no measurable effect in this model (a 7-day mean of daily-max wind); Models
+  A/B address it with event-day gusts.
+- Tile pre-warm covers California land only (9,696 → 4,142 tiles); the ocean/out-of-state tiles
+  failed on every run and flooded the failure digest.
+- NASA POWER: parallel lookups of one window send one request; event-day parameters ride on it.
 - Daily ingest rows carry the same provenance columns; each training file keeps its own header.
 
 ## [3.3-stable] — 2026-11-25

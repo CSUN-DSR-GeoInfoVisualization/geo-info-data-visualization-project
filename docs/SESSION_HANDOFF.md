@@ -1,14 +1,31 @@
 # FireScope — Session Handoff
 
-**Stable tag:** `v3.3-stable` (2026-11-25) — prior: `v3.2-stable` (2026-06-19)
+**Stable tag:** `v3.4-stable` (2026-11-26) — prior: `v3.3-stable` (2026-11-25)
 **Live URL:** https://firescope.dev (custom domain, HTTPS) · https://firescope.netlify.app
 **API:** https://firescope-api.onrender.com/api
-**GitHub Release:** https://github.com/CSUN-DSR-GeoInfoVisualization/geo-info-data-visualization-project/releases/tag/v3.3-stable
+**GitHub Release:** https://github.com/CSUN-DSR-GeoInfoVisualization/geo-info-data-visualization-project/releases/tag/v3.4-stable
 **Repo:** the GitHub org was renamed from `CSUN-ARCS-GeoInfoVisualization` to `CSUN-DSR-GeoInfoVisualization` (old URLs redirect).
 
 This document is the single source of truth for picking up FireScope work in a fresh session. Read this first, then `README.md`, then jump in.
 
 ---
+
+## What v3.4-stable adds (2026-11-26)
+
+- **Training set 2001 → present** (`backend/ml/training_data/weather_app_plan/california_weatherapp.csv`,
+  29,000+ rows; MODIS labels before 2012, VIIRS after). Every row: `weather_method=skill_weighted_v0`,
+  ≥2 weather sources, raw per-source readings. `ml.retrain_and_gate` reads it and refuses anything else
+  (`check_skill_weighted`). Daily ingest appends to it (each file keeps its own header).
+- **Model promoted 2026-11-26** (same six inputs): held-out AUROC 0.594 / Brier 0.249 vs 0.521 / 0.328.
+  Wind has no measurable effect (flagged by the gate as a dead feature).
+- **In progress (not live):** Models A (fire start: same-place, wet-season and random-spot controls) and B
+  (growth to ≥ 1,000 acres from each mapped fire's first detection), with event-day inputs (peak gust,
+  offshore push, min RH, max VPD, 7-day rain) stored raw per source. Tools: `ml.backfill_matched raw /
+  spatial / growth-set / label-size / merge`, `ml.event_skill`, `ml.train_ab`, `ml.station_truth`.
+  RTMA gusts start 2014-02; gust is blank (not filled) before its two-source era.
+- Tile pre-warm covers California land only; NASA POWER lookups are single-flight.
+- **Promotion path:** `gh workflow run daily-retrain.yml -f promote=true`, then run the
+  "Restart Render after backend deploy" workflow by hand (bot commits don't trigger it).
 
 ## v3.3-stable updates (2026-11-25, part of the release)
 
