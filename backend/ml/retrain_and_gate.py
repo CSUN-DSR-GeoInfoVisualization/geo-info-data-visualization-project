@@ -33,7 +33,7 @@ from sklearn.metrics import roc_auc_score, brier_score_loss, accuracy_score
 
 from ml.train_monotonic import (
     train_monotonic, validate_monotonicity, gate_passes, dead_constrained_features,
-    weak_features, MIN_INPUT_EFFECT, FEATURE_COLS, MONOTONIC_CST,
+    weak_features, MIN_INPUT_EFFECT, tier_report, tier_failures, FEATURE_COLS, MONOTONIC_CST,
 )
 from ml.geo_checks import on_ca_land
 
@@ -298,6 +298,11 @@ def evaluate(now_iso):
 
     Xte, yte = te[FEATURE_COLS].values, te["fire"].values
     cand_m = _metrics(cand, cand_scaler, Xte, yte)
+    # The five tiers must be used, judged on all rows (the holdout is one season).
+    tiers = tier_report(cand.predict_proba(cand_scaler.transform(X))[:, 1], y)
+    if tier_failures(tiers):
+        cand_phys_ok = False
+        bad = bad + [f"tiers: {r}" for r in tier_failures(tiers)]
     pm, ps = joblib.load(_MODEL_OUT), joblib.load(_SCALER_OUT)
     prod_m = _metrics(pm, ps, Xte, yte)
     prod_phys_ok = gate_passes(validate_monotonicity(pm, ps, X_ref=tr[FEATURE_COLS].values), MIN_INPUT_EFFECT)
