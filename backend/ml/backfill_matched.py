@@ -86,7 +86,7 @@ def fill(args):
             for r in csv.DictReader(f):
                 done.add(r["week"])
     new_file = not os.path.exists(args.out)
-    cols = ["week"] + mi.ROW_COLS + ["sensor", "pixel_m", "n_weather_sources"]
+    cols = ["week"] + mi.ROW_COLS + ["sensor", "pixel_m", "n_weather_sources"] + mi.RAW_WEATHER_COLS
     if not new_file:  # files started before n_weather_sources existed keep their header
         with open(args.out, newline="") as f:
             cols = next(csv.reader(f))
@@ -121,7 +121,8 @@ def fill(args):
                 rows = []
                 for label, date in ((1, d), (0, mi._prior_year(d))):
                     try:
-                        feats, n_src = mi._features_for_historical(lat, lon, date)
+                        raw = {}
+                        feats, n_src = mi._features_for_historical(lat, lon, date, raw=raw)
                     except RateLimited:
                         raise SystemExit(f"STOPPED at {wk}: a weather source is rate-limiting us; "
                                          f"no rows written for this week. Rerun to resume.")
@@ -132,7 +133,7 @@ def fill(args):
                         stats["fail"] += 1
                         break
                     row = {"lat": round(lat, 5), "lon": round(lon, 5), "acq_date": date, **feats,
-                           "n_weather_sources": n_src,
+                           "n_weather_sources": n_src, **raw,
                            "fire": label, "source": (("firms_modis" if monday < dt.date(2012, 1, 20) else "firms_viirs")
                                                      if label else "matched_control")}
                     if mi._row_quality_issue(row):
@@ -144,7 +145,8 @@ def fill(args):
                     for row in rows:
                         w.writerow({"week": wk, **{c: row.get(c) for c in mi.ROW_COLS},
                                     "sensor": "MODIS" if modis else "VIIRS", "pixel_m": 1000 if modis else 375,
-                                    "n_weather_sources": row["n_weather_sources"]})
+                                    "n_weather_sources": row["n_weather_sources"],
+                                    **{c: row.get(c) for c in mi.RAW_WEATHER_COLS}})
                     pairs += 1
             f.flush()
             stats["pairs"] += pairs
@@ -187,14 +189,15 @@ def regrade(args):
     app = _app()
     with open(args.inp, newline="") as f:
         rows = list(csv.DictReader(f))
-        cols = list(rows[0].keys()) + (["n_weather_sources"] if "n_weather_sources" not in rows[0] else [])
+        cols = list(rows[0].keys()) + [c for c in ["n_weather_sources"] + mi.RAW_WEATHER_COLS if c not in rows[0]]
     kept, dropped = [], []
     with app.app_context():
         for i, r in enumerate(rows):
             try:
-                feats, n = mi._features_for_historical(float(r["lat"]), float(r["lon"]), r["acq_date"])
+                raw = {}
+                feats, n = mi._features_for_historical(float(r["lat"]), float(r["lon"]), r["acq_date"], raw=raw)
                 r = {**r, "air_temp_encoded": feats["air_temp_encoded"], "wind": feats["wind"], "humidity": feats["humidity"],
-                     "n_weather_sources": n}
+                     "n_weather_sources": n, **{c: raw.get(c) for c in mi.RAW_WEATHER_COLS}}
                 kept.append(r)
             except RateLimited:
                 raise SystemExit(f"STOPPED at row {i}: a weather source is rate-limiting us. Rerun regrade.")

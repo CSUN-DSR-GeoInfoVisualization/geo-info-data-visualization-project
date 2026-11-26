@@ -106,3 +106,13 @@ def test_archive_window_never_requests_future_dates(monkeypatch):
     today = dt.datetime.utcnow().strftime("%Y-%m-%d")
     ml_ingest._weather_for_date(37.8, -122.3, today)
     assert seen["end_date"] < today
+
+
+def test_raw_per_source_values_are_kept(monkeypatch):
+    _stub_static(monkeypatch)
+    _sources(monkeypatch)
+    raw = {}
+    feats, n = ml_ingest._features_for_historical(37.8, -122.3, "2026-11-06", raw=raw)
+    assert n == 3
+    assert raw["rtma_humidity"] == 50 and raw["merra2_humidity"] == 45.0 and raw["era5_humidity"] == 40
+    assert set(raw) == set(ml_ingest.RAW_WEATHER_COLS)
