@@ -76,7 +76,7 @@ def main():
     ap.add_argument("--data", default=WEATHERAPP)
     ap.add_argument("--growth", default=GROWTH)
     a = ap.parse_args()
-    weights = json.load(open(a.weights)) if a.weights else None
+    weights = json.load(open(a.weights))["weights"] if a.weights else None
     d = blend_events(pd.read_csv(a.data, low_memory=False), weights)
     year = d["acq_date"].str[:4].astype(int)
     pair_year = np.where(d["control_type"].eq("same_place"), year + 1, year)  # keep pairs together
