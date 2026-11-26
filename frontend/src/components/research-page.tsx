@@ -439,7 +439,7 @@ function ResearchMapView() {
   // Extended tracking parameters — the current ML model only consumes EVI/LST/
   // wind/elevation, but the UI exposes the full feature set that the upcoming
   // retrain (option 3 — ActiveFireSnapshot) will consume: Date, Latitude,
-  // Longitude, TA (thermal anomalies), NDVI (vegetation cover), and Fire (the
+  // Longitude, NDVI (vegetation cover), and Fire (the
   // binary outcome label). The extra fields travel with the override payload
   // so the snapshot-capture job can log them verbatim for training data.
   const [dateSlider, setDateSlider] = useState<number>(() => {
@@ -449,10 +449,9 @@ function ResearchMapView() {
   });
   const [latSlider, setLatSlider] = useState(36.7); // California centroid
   const [lonSlider, setLonSlider] = useState(-119.4);
-  const [taSlider, setTaSlider] = useState(0); // MODIS thermal anomalies level, 0-100
   const [ndviSlider, setNdviSlider] = useState(0.3); // -1 to 1 in theory; 0-1 for vegetation cover
   const [fireBinary, setFireBinary] = useState(false); // binary fire occurrence outcome label
-  const [zoneOverrides, setZoneOverrides] = useState<Record<string, { evi: number; lst: number; wind: number; elevation: number; kbdi?: number; humidity?: number; date?: number; latitude?: number; longitude?: number; ta?: number; ndvi?: number; fire?: boolean }>>({});
+  const [zoneOverrides, setZoneOverrides] = useState<Record<string, { evi: number; lst: number; wind: number; elevation: number; kbdi?: number; humidity?: number; date?: number; latitude?: number; longitude?: number; ndvi?: number; fire?: boolean }>>({});
 
   useEffect(() => {
     let cancelled = false;
@@ -1120,10 +1119,6 @@ function ResearchMapView() {
                         <input type="range" min={0} max={800} step={10} value={kbdiSlider} onChange={(e) => { const v = Number(e.target.value); setKbdiSlider(v); updateZoneOverride("kbdi", v); }} disabled={!useOverrides || !selectedZone} className="w-full mt-1 accent-amber-600 disabled:opacity-40" />
                       </div>
                       <div>
-                        <label className="text-xs font-medium flex justify-between">🔥 TA (Thermal Anomalies) <span className="text-muted-foreground">{taSlider}</span></label>
-                        <input type="range" min={0} max={100} step={1} value={taSlider} onChange={(e) => { const v = Number(e.target.value); setTaSlider(v); updateZoneOverride("ta", v); }} disabled={!useOverrides || !selectedZone} className="w-full mt-1 accent-red-500 disabled:opacity-40" />
-                      </div>
-                      <div>
                         <label className="text-xs font-medium flex justify-between">🌳 NDVI (Vegetation cover) <span className="text-muted-foreground">{ndviSlider.toFixed(2)}</span></label>
                         <input type="range" min={-1} max={1} step={0.01} value={ndviSlider} onChange={(e) => { const v = Number(e.target.value); setNdviSlider(v); updateZoneOverride("ndvi", v); }} disabled={!useOverrides || !selectedZone} className="w-full mt-1 accent-emerald-500 disabled:opacity-40" />
                       </div>
@@ -1132,7 +1127,7 @@ function ResearchMapView() {
                         <input type="checkbox" checked={fireBinary} onChange={(e) => { const v = e.target.checked; setFireBinary(v); updateZoneOverride("fire", v as any); }} disabled={!useOverrides || !selectedZone} className="accent-red-500 disabled:opacity-40" />
                       </label>
                       <p className="text-[10px] text-muted-foreground">
-                        EVI · LST · Wind · Elevation drive the current model. TA · NDVI · Fire are logged for the next retrain (see ActiveFireSnapshot in backend/routes/history.py).
+                        EVI · Temperature · Wind · Elevation · Drought (KBDI) drive the model; humidity comes from the zone's live value. NDVI and Fire are logged with the override for research, not used by the model yet.
                       </p>
                     </div>
 
