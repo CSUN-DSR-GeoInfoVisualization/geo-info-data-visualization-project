@@ -6,7 +6,6 @@ import { Map, useMap } from "@vis.gl/react-google-maps";
 import { GoogleMapsOverlay } from "@deck.gl/google-maps";
 import { GeoJsonLayer, IconLayer } from "@deck.gl/layers";
 import { firmsPointsToPolygonCollection } from "../utils/firmsPolygons";
-import { HeatmapLayer } from "@deck.gl/aggregation-layers";
 import { CenteredInfoCard } from "./centered-info-card";
 import { MapLegend } from "./map-legend";
 import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
@@ -86,7 +85,7 @@ function RequestAccessView({ isGuest, onLoginRequired }: { isGuest?: boolean; on
         {[
           { icon: MapIcon, title: "Interactive Fire Map", desc: "Visualize FIRMS hotspots, risk predictions, and historical perimeters on an interactive map" },
           { icon: SlidersHorizontal, title: "Adjustable Parameters", desc: "Fine-tune confidence thresholds, fire radiative power, and risk score cutoffs with sliders" },
-          { icon: Layers, title: "Multiple Data Layers", desc: "Toggle between FIRMS satellite data, ML risk heatmaps, and historical fire perimeters" },
+          { icon: Layers, title: "Multiple Data Layers", desc: "Toggle between FIRMS satellite data, ML risk zones, and historical fire perimeters" },
           { icon: Flame, title: "Real-Time Risk Colors", desc: "See color-coded risk gradients from green (low) to dark red (extreme) across California" },
         ].map(({ icon: Icon, title, desc }) => (
           <Card key={title}>
@@ -164,7 +163,6 @@ function RequestAccessView({ isGuest, onLoginRequired }: { isGuest?: boolean; on
 /* ------------------------------------------------------------------ */
 interface UnifiedOverlayProps {
   features: any[];
-  showHeatmap: boolean;
   zoneGeoJson: any;
   zoneRiskData: Record<string, { risk_score: number; label: string }>;
   zoneNameKey: string;
@@ -181,7 +179,7 @@ interface UnifiedOverlayProps {
 // 5-tier shared palette — lib/riskTiers.ts
 import { riskRgba as getRiskColor } from "../lib/riskTiers";
 
-function UnifiedResearchOverlay({ features, showHeatmap, zoneGeoJson, zoneRiskData, zoneNameKey, onZoneClick, nifcPerimeters, showPerimeters, onPerimeterClick, shelters = [], showShelters = false, onShelterClick }: UnifiedOverlayProps) {
+function UnifiedResearchOverlay({ features, zoneGeoJson, zoneRiskData, zoneNameKey, onZoneClick, nifcPerimeters, showPerimeters, onPerimeterClick, shelters = [], showShelters = false, onShelterClick }: UnifiedOverlayProps) {
   const map = useMap();
   const overlayRef = useRef<GoogleMapsOverlay | null>(null);
   // Refs so callback identity changes don't tear down the overlay (was a major flicker source)
@@ -208,24 +206,6 @@ function UnifiedResearchOverlay({ features, showHeatmap, zoneGeoJson, zoneRiskDa
     if (!overlayRef.current) return;
 
     const layers: any[] = [];
-
-    // 1. FIRMS heatmap (bottom layer)
-    if (showHeatmap && features.length > 0) {
-      layers.push(
-        new HeatmapLayer({
-          id: "research-heatmap",
-          data: features,
-          getPosition: (d: any) => d.geometry.coordinates,
-          getWeight: (d: any) => (d.properties.confidence || 50) * (d.properties.frp || 1),
-          radiusPixels: 60, intensity: 1.5, threshold: 0.05,
-          colorRange: [
-            [34, 197, 94, 80], [234, 179, 8, 120], [234, 88, 12, 160],
-            [220, 38, 38, 200], [153, 27, 27, 220],
-          ],
-          updateTriggers: { getWeight: [features.length] },
-        })
-      );
-    }
 
     // 2. Risk zone polygons (middle layer — clickable)
     if (zoneGeoJson?.features && Object.keys(zoneRiskData).length > 0) {
@@ -365,7 +345,7 @@ function UnifiedResearchOverlay({ features, showHeatmap, zoneGeoJson, zoneRiskDa
     }
 
     overlayRef.current.setProps({ layers });
-  }, [features, showHeatmap, zoneGeoJson, zoneRiskData, zoneNameKey, nifcPerimeters, showPerimeters, shelters, showShelters]);
+  }, [features, zoneGeoJson, zoneRiskData, zoneNameKey, nifcPerimeters, showPerimeters, shelters, showShelters]);
 
   return null;
 }
@@ -419,7 +399,6 @@ function ResearchMapView() {
   const [features, setFeatures] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [activeLayer, setActiveLayer] = useState<"fires" | "zones" | "mixed">("mixed");
-  const showHeatmap = activeLayer !== "zones";
   const showZones = activeLayer !== "fires";
   const [zoneLevel, setZoneLevel] = useState<"counties" | "zip-codes" | "census-tracts" | "neighborhoods">("counties");
   const [selectedZone, setSelectedZone] = useState<string | null>(null);
@@ -771,7 +750,6 @@ function ResearchMapView() {
             >
               <UnifiedResearchOverlay
                 features={features}
-                showHeatmap={showHeatmap}
                 shelters={shelters}
                 showShelters={showShelters}
                 onShelterClick={setSelectedShelter}
