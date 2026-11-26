@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { User, MapPin, Bell, Shield, ChevronRight, Info, Satellite, Building2, Newspaper, Map, Brain } from "lucide-react";
+import { User, MapPin, Bell, Shield, ChevronRight, Info, Satellite, Building2, Newspaper, Map, Brain, CloudSun } from "lucide-react";
 import { Badge } from "./ui/badge";
 import { Skeleton } from "./ui/skeleton";
 import { MyLocations } from "./my-locations";
@@ -211,16 +211,68 @@ export function SettingsPage({ defaultTab = "profile" }: SettingsPageProps) {
                 </div>
                 <div className="divide-y">
                   <AboutItem
-                    name="NASA FIRMS (VIIRS NOAA-20)"
-                    description="Real-time satellite fire detection. Provides active fire hotspots with latitude, longitude, confidence level, and Fire Radiative Power (FRP) measurements updated multiple times daily."
+                    name="NASA FIRMS (VIIRS NOAA-20 + archive)"
+                    description="Real-time satellite fire detection: active fire hotspots with latitude, longitude, confidence level, and Fire Radiative Power (FRP), updated multiple times daily. Training labels come from the FIRMS standard-processing archive, vegetation fires only: MODIS (1 km) for 2001–2011, VIIRS S-NPP and NOAA-20 (375 m) from 2012."
                     badge="Real-time"
                     badgeColor="bg-red-100 text-red-700"
                   />
                   <AboutItem
-                    name="NASA ORNL DAAC — MODIS (MOD13Q1)"
-                    description="Enhanced Vegetation Index (EVI) data used to assess fire fuel load and vegetation dryness. Sourced from the MODIS satellite via the Oak Ridge National Laboratory DAAC web service."
+                    name="MODIS MOD13Q1 EVI — Google Earth Engine (NASA ORNL DAAC backup)"
+                    description="Enhanced Vegetation Index (EVI), the model's measure of fuel greenness and dryness. Read from the MODIS 16-day composites in Google Earth Engine (the live map uses the newest valid composite per pixel); the Oak Ridge National Laboratory DAAC web service serves the same product as a backup."
                     badge="250m resolution"
                     badgeColor="bg-green-100 text-green-700"
+                  />
+                </div>
+              </div>
+
+              {/* Weather, Stations & Terrain */}
+              <div className="border rounded-xl bg-white overflow-hidden">
+                <div className="px-6 py-4 border-b bg-muted/30 flex items-center gap-2">
+                  <CloudSun className="h-4 w-4 text-sky-500" />
+                  <h3 className="font-semibold text-sm">Weather, Stations & Terrain</h3>
+                </div>
+                <div className="divide-y">
+                  <AboutItem
+                    name="NOAA RTMA (via Google Earth Engine)"
+                    description="The National Weather Service's Real-Time Mesoscale Analysis: a 2.5 km hourly analysis built from surface weather-station observations. The most accurate of the three training weather sources (2011 onward); its gust field starts in February 2014."
+                    badge="2.5 km hourly"
+                    badgeColor="bg-sky-100 text-sky-700"
+                  />
+                  <AboutItem
+                    name="ERA5 reanalysis (Open-Meteo historical API)"
+                    description="ECMWF's global reanalysis, read through Open-Meteo's historical weather API. A training weather source for every year from 2001, and the backup for the drought index."
+                    badge="Reanalysis"
+                    badgeColor="bg-sky-100 text-sky-700"
+                  />
+                  <AboutItem
+                    name="NASA POWER (MERRA-2)"
+                    description="NASA's MERRA-2 reanalysis via the POWER daily API. An independent third weather source for training, and the temperature and rainfall history behind the Keetch-Byram Drought Index."
+                    badge="Reanalysis"
+                    badgeColor="bg-sky-100 text-sky-700"
+                  />
+                  <AboutItem
+                    name="Open-Meteo (live weather)"
+                    description="Current temperature, humidity and wind for the live risk map, as daily values in the same definitions the model trains on."
+                    badge="Live"
+                    badgeColor="bg-red-100 text-red-700"
+                  />
+                  <AboutItem
+                    name="Iowa Environmental Mesonet — ASOS/AWOS airport stations"
+                    description="Hourly observations from California's airport weather stations (161 in the archive, 2001 to present), quality-controlled (range, spike and stuck-sensor checks). The ground truth each weather source is scored against; those scores set how much each source counts."
+                    badge="Weather stations"
+                    badgeColor="bg-emerald-100 text-emerald-700"
+                  />
+                  <AboutItem
+                    name="NOAA U.S. Climate Reference Network (USCRN)"
+                    description="Seven reference-grade climate stations in California, independent of the airport network, used as a second check on temperature and humidity skill."
+                    badge="Reference stations"
+                    badgeColor="bg-emerald-100 text-emerald-700"
+                  />
+                  <AboutItem
+                    name="USGS 3DEP elevation (Open-Elevation backup)"
+                    description="Terrain elevation from the USGS 3D Elevation Program's point query service, with Open-Elevation as the backup."
+                    badge="Terrain"
+                    badgeColor="bg-stone-100 text-stone-700"
                   />
                 </div>
               </div>
@@ -252,8 +304,14 @@ export function SettingsPage({ defaultTab = "profile" }: SettingsPageProps) {
                   />
                   <AboutItem
                     name="CAL FIRE Historic Fire Perimeters (1878–present)"
-                    description="California's authoritative fire-perimeter archive — 23k+ polygons back to 1878, every recorded fire of any size, supplemented by 2,475 California wildfires found only in NIFC's interagency fire history. Powers the History page's year-by-year selector; fetched server-side via /api/history/perimeters?year=N with a 1-hour cache. Filter: GIS_ACRES ≥ 100."
+                    description="California's authoritative fire-perimeter archive — 23k+ polygons back to 1878, every recorded fire of any size. Powers the History page's year-by-year selector (server-side via /api/history/perimeters, cached), and gives each training fire its final size."
                     badge="State agency"
+                    badgeColor="bg-orange-100 text-orange-700"
+                  />
+                  <AboutItem
+                    name="NIFC InterAgency Fire Perimeter History"
+                    description="The federal interagency perimeter archive. Adds 2,475 California wildfires missing from CAL FIRE's archive and recovers the year of 63 undated fires, after removing prescribed burns, out-of-state fires and duplicates. Refreshed weekly."
+                    badge="Federal agency"
                     badgeColor="bg-orange-100 text-orange-700"
                   />
                   <AboutItem
@@ -330,7 +388,7 @@ export function SettingsPage({ defaultTab = "profile" }: SettingsPageProps) {
                 <div className="divide-y">
                   <AboutItem
                     name="scikit-learn Risk Model (active)"
-                    description="A monotonicity-constrained gradient-boosted classifier (scikit-learn HistGradientBoosting) with 5-fold isotonic probability calibration, trained over 6 live inputs: EVI (vegetation greenness), air temperature, wind speed, relative humidity, elevation, and the KBDI drought index. Output is mapped to the canonical 5-tier NFDRS scale (Low / Moderate / High / Very High / Extreme — equal 20% bands) that drives every polygon color, popup chip, side-panel badge, and alert email subject on the site. Per-zone overrides are applied through POST /api/predict-custom for researcher experiments."
+                    description="A monotonicity-constrained gradient-boosted classifier (scikit-learn HistGradientBoosting) with 5-fold isotonic probability calibration, trained over 6 live inputs: EVI (vegetation greenness), air temperature, wind speed, relative humidity, elevation, and the KBDI drought index. The live model was promoted on 2026-11-26 after training on every fire and matched control from 2001 to the present (29,000+ rows). Output is mapped to the canonical 5-tier NFDRS scale (Low / Moderate / High / Very High / Extreme — equal 20% bands) that drives every polygon color, popup chip, side-panel badge, and alert email subject on the site. Per-zone overrides are applied through POST /api/predict-custom for researcher experiments."
                     badge="ML model"
                     badgeColor="bg-red-100 text-red-700"
                   />
@@ -342,7 +400,7 @@ export function SettingsPage({ defaultTab = "profile" }: SettingsPageProps) {
                   />
                   <AboutItem
                     name="Live data inputs & where they come from"
-                    description="EVI — vegetation greenness, a proxy for available fuel — from Google Earth Engine's MODIS MOD13Q1 product. Air temperature, wind speed, and relative humidity from Open-Meteo. Ground elevation from USGS 3DEP (with Open-Elevation as a fallback). And the Keetch–Byram Drought Index (KBDI), a 0–800 cumulative soil-moisture-deficit measure of how dry the landscape has become. Every lookup follows a resilient fallback chain — cached map tile → live API → inverse-distance-weighted interpolation from reference stations — so the model always receives a complete six-value feature vector and never has to return a blank score."
+                    description="EVI — vegetation greenness, a proxy for available fuel — from Google Earth Engine's MODIS MOD13Q1 product (the newest valid 16-day composite per pixel). Air temperature, wind speed, and relative humidity from Open-Meteo. Ground elevation from USGS 3DEP (with Open-Elevation as a fallback). And the Keetch–Byram Drought Index (KBDI), a 0–800 cumulative soil-moisture-deficit measure of how dry the landscape has become, computed from NASA POWER's last 30 days of temperature and rainfall (Open-Meteo as backup). Every lookup follows a resilient fallback chain — cached map tile → live API → inverse-distance-weighted interpolation from reference stations — so the model always receives a complete six-value feature vector and never has to return a blank score."
                     badge="Data inputs"
                     badgeColor="bg-sky-100 text-sky-700"
                   />

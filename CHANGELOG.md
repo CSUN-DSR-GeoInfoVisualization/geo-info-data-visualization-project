@@ -38,6 +38,11 @@ The 2001 → present training backfill is complete, and the model trained on it 
 - Tile pre-warm covers California land only (9,696 → 4,142 tiles); the ocean/out-of-state tiles
   failed on every run and flooded the failure digest.
 - NASA POWER: parallel lookups of one window send one request; event-day parameters ride on it.
+- **Every data source documented** (README and Settings → About): new "Weather, Stations & Terrain"
+  section (NOAA RTMA, ERA5 via Open-Meteo, NASA POWER/MERRA-2, Open-Meteo live, Iowa Environmental
+  Mesonet ASOS/AWOS stations, NOAA USCRN, USGS 3DEP + Open-Elevation), NIFC InterAgency Fire
+  Perimeter History, the FIRMS MODIS/VIIRS training archive, Earth Engine as the primary EVI source,
+  and the KBDI's data source. Removed the outdated "GIS_ACRES ≥ 100" perimeter filter note.
 - Daily ingest rows carry the same provenance columns; each training file keeps its own header.
 
 ## [3.3-stable] — 2026-11-25
