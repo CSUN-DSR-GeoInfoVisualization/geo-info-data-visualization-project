@@ -127,3 +127,12 @@ def test_known_elevation_is_reused_not_fetched(monkeypatch):
     monkeypatch.setattr(le, "get_elevation", lambda *a: (_ for _ in ()).throw(RuntimeError("both elevation sources down")))
     feats, n = ml_ingest._features_for_historical(37.8, -122.3, "2026-11-06", elevation=123.0)
     assert feats["elevation"] == 123.0
+
+
+def test_fetch_firms_splits_windows_over_five_days(monkeypatch):
+    urls = []
+    monkeypatch.setattr(ml_ingest, "FIRMS_MAP_KEY", "k")
+    monkeypatch.setattr(ml_ingest.requests, "get", lambda url, timeout: urls.append(url) or _Resp())
+    fires, _ = ml_ingest._fetch_firms(7, "2026-11-01")
+    assert [u.rsplit("/", 2)[1:] for u in urls] == [["5", "2026-11-01"], ["2", "2026-11-06"]]  # FIRMS max 5 days
+    assert len(fires) == 2

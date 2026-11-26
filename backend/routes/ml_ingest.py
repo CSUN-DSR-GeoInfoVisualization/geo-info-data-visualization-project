@@ -540,6 +540,15 @@ def _is_low_confidence(val: str) -> bool:
 def _fetch_firms(days, date=""):
     """Returns (kept_detections, n_low_confidence_dropped). kept = list of
     (lat, lon, acq_date) for nominal/high-confidence fire pixels only."""
+    if days > 5:  # FIRMS's area API takes 1-5 days per request (rejects more since Nov 2026)
+        import datetime as _d
+        start = _d.date.fromisoformat(date) if date else _d.datetime.utcnow().date() - _d.timedelta(days=days - 1)
+        fires, low = [], 0
+        for k in range(0, days, 5):
+            f, l = _fetch_firms(min(5, days - k), str(start + _d.timedelta(days=k)))
+            fires += f
+            low += l
+        return fires, low
     if not FIRMS_MAP_KEY:
         return [], 0
     lon0, lat0, lon1, lat1 = CA_BBOX
