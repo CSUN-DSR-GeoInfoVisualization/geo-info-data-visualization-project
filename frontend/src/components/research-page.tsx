@@ -545,7 +545,7 @@ function ResearchMapView() {
                   wind: ov.wind,
                   humidity: (ov as any).humidity ?? liveFeatures(name)?.humidity ?? 50,
                   elevation: ov.elevation,
-                  kbdi: (ov as any).kbdi ?? 200,
+                  kbdi: (ov as any).kbdi ?? liveFeatures(name)?.kbdi ?? 200,  // the zone's real drought, like humidity
                   zone_name: name,
                 };
                 const r = await apiFetch("/predict-custom", {
