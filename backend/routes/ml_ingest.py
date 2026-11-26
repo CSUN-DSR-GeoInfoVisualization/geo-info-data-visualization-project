@@ -324,7 +324,13 @@ def _prior_year(date_str):
         return t.replace(year=t.year - 1, day=28).strftime("%Y-%m-%d")
 
 
-def _features_for_historical(lat, lon, date_str):
+# Raw per-source weather kept beside the blend, so a new source or new skill weights
+# can be applied to existing rows without re-fetching or replacing them.
+WEATHER_SOURCES = ("rtma", "era5", "merra2")
+RAW_WEATHER_COLS = [f"{s}_{k}" for s in WEATHER_SOURCES for k in ("temperature_celsius", "humidity", "wind_speed")]
+
+
+def _features_for_historical(lat, lon, date_str, raw=None):
     """EVERY time-varying feature as it was on `date_str` — weather, vegetation
     and drought. Used to build matched control rows a year back, where reusing
     today's EVI or KBDI would pair last year's wind with this year's drought and
@@ -349,6 +355,8 @@ def _features_for_historical(lat, lon, date_str):
                    "era5": era5 and {"temperature_celsius": era5["air_temp_encoded"] * 0.02 - 273.15,
                                      "humidity": era5["humidity"], "wind_speed": era5["wind"]}}
     sources = {n: v for n, v in sources.items() if v}
+    if raw is not None:  # caller wants each source's own reading (missing source = absent)
+        raw.update({f"{n}_{k}": x for n, v in sources.items() for k, x in v.items()})
     if len(sources) < 2:  # one source has nothing to cross-check it against
         raise RuntimeError(f"only {len(sources)} weather source(s) ({', '.join(sources) or 'none'}) on {date_str}; need 2")
     wx, notes = _blend_weather(sources)
