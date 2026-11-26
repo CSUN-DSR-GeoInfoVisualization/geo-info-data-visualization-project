@@ -69,30 +69,51 @@ def train_monotonic(X, y, calibrate=True, monotonic_cst=None):
     return model, scaler
 
 
-def validate_monotonicity(model, scaler, n=25, tol=1e-6):
+def validate_monotonicity(model, scaler, n=25, tol=1e-6, X_ref=None):
     """PDP-style gate. For each constrained feature, sweep it across the training
     range (others held at the training mean) and check risk moves in the required
     direction the whole way. The retrain pipeline must REFUSE to promote a
     candidate if any constrained feature fails — that's how an inverted/dead
     feature can never silently ship again.
 
+    X_ref (real rows): sweep each feature across its 5th-95th percentile and
+    average the risk over those rows (a true partial dependence), for EVERY
+    feature, constrained or not. That is what the map experiences; a sweep at the
+    single mean point misses effects that only appear with other conditions
+    (e.g. heat on dry days) and reports dead features as alive (audit 2026-11-26).
+
     Returns {feature: {expected, ok, max_violation, range}}.
     """
     mean = scaler.mean_
     sd = scaler.scale_
+    ref = None if X_ref is None else np.asarray(X_ref, dtype=float)
+    if ref is not None and len(ref) > 400:
+        ref = ref[np.random.default_rng(0).choice(len(ref), 400, replace=False)]
     report = {}
     for i, name in enumerate(FEATURE_COLS):
         want = MONOTONIC_CST[i]
-        if want == 0:
+        if want == 0 and ref is None:
             report[name] = {"expected": "free", "ok": True, "max_violation": 0.0, "range": None}
             continue
-        lo, hi = mean[i] - 2 * sd[i], mean[i] + 2 * sd[i]
+        if ref is None:
+            lo, hi = mean[i] - 2 * sd[i], mean[i] + 2 * sd[i]
+        else:
+            lo, hi = np.percentile(ref[:, i], [5, 95])
         pts = np.linspace(lo, hi, n)
         risks = []
         for p in pts:
-            x = mean.copy()
-            x[i] = p
-            risks.append(float(model.predict_proba(scaler.transform([x]))[0][1]))
+            if ref is None:
+                x = mean.copy()
+                x[i] = p
+                risks.append(float(model.predict_proba(scaler.transform([x]))[0][1]))
+            else:
+                z = ref.copy()
+                z[:, i] = p
+                risks.append(float(model.predict_proba(scaler.transform(z))[:, 1].mean()))
+        if want == 0:
+            report[name] = {"expected": "free", "ok": True, "max_violation": 0.0,
+                            "range": round(max(risks) - min(risks), 4)}
+            continue
         diffs = np.diff(risks)
         # A step in the WRONG direction is a positive violation; want=+1 means
         # diffs should be >=0, so a violation is a negative diff (and vice versa).
@@ -106,9 +127,23 @@ def validate_monotonicity(model, scaler, n=25, tol=1e-6):
     return report
 
 
-def gate_passes(report):
-    """True iff every constrained feature respects its physical direction."""
-    return all(v["ok"] for v in report.values())
+def gate_passes(report, min_effect=None):
+    """True iff every constrained feature respects its physical direction and,
+    with min_effect, every feature moves risk by at least that much."""
+    return all(v["ok"] for v in report.values()) and (
+        min_effect is None or not weak_features(report, min_effect))
+
+
+# Every input must matter (Ido, 2026-11-26): across its 5th-95th percentile, on
+# real rows, each feature must move the average risk by at least a quarter of a
+# risk tier (tiers are 0.20 wide). A model that ignores temperature or wind is
+# not predicting wildfire risk, however good its AUROC.
+MIN_INPUT_EFFECT = 0.05
+
+
+def weak_features(report, min_effect=MIN_INPUT_EFFECT):
+    """Features whose measured effect is below min_effect (unmeasured counts as weak)."""
+    return [n for n, v in report.items() if v.get("range") is None or v["range"] < min_effect]
 
 
 # A constrained feature whose risk range over the swept interval is below this
