@@ -88,3 +88,13 @@ def test_every_input_must_matter():
     assert gate_passes(rep, 0.05) is False
     rep["wind"]["ok"] = False
     assert gate_passes(rep) is False
+
+
+def test_tier_gate():
+    from ml.train_monotonic import tier_report, tier_failures
+    import numpy as np
+    y = np.r_[np.zeros(50), np.ones(50)]
+    spread = tier_report(np.r_[np.linspace(0.05, 0.55, 50), np.linspace(0.45, 0.95, 50)], y)
+    assert tier_failures(spread) == []
+    squeezed = tier_report(np.full(100, 0.47), y)          # everything "High"
+    assert any("in High" in r for r in tier_failures(squeezed))

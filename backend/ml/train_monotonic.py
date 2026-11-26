@@ -166,3 +166,37 @@ def dead_constrained_features(report, min_effect=MIN_EFFECT):
     """
     return [name for name, v in report.items()
             if v["range"] is not None and v["range"] < min_effect]
+
+# The five NFDRS tiers must be used (Ido, 2026-11-26): a model that puts nearly
+# every place in one tier cannot tell a safe place from a dangerous one, however
+# well it ranks. Measured: the 2026-11-26 model put 88.7% of rows in "High".
+TIERS = ("Low", "Moderate", "High", "Very High", "Extreme")
+MAX_TIER_SHARE = 0.50   # no tier holds more than half the rows
+MIN_TIERS_USED = 3      # at least this many tiers each hold >= MIN_TIER_SHARE
+MIN_TIER_SHARE = 0.05
+
+
+def tier_report(probs, y):
+    """{tier: {share, fire_rate}} with the live cutoffs (ml.inference.risk_label)."""
+    from ml.inference import risk_label
+    probs, y = np.asarray(probs), np.asarray(y)
+    labels = np.array([risk_label(p) for p in probs])
+    return {t: {"share": round(float((labels == t).mean()), 3),
+                "fire_rate": round(float(y[labels == t].mean()), 3) if (labels == t).any() else None}
+            for t in TIERS}
+
+
+def tier_failures(report):
+    """Reasons the tiers fail: one tier dominates, too few tiers used, or the fire
+    rate falls from a used tier to the next (or never rises at all)."""
+    out = []
+    top = max(report, key=lambda t: report[t]["share"])
+    if report[top]["share"] > MAX_TIER_SHARE:
+        out.append(f"{report[top]['share']:.0%} of rows in {top} (max {MAX_TIER_SHARE:.0%})")
+    used = [t for t in TIERS if report[t]["share"] >= MIN_TIER_SHARE]
+    if len(used) < MIN_TIERS_USED:
+        out.append(f"only {len(used)} tier(s) hold >= {MIN_TIER_SHARE:.0%} of rows (need {MIN_TIERS_USED})")
+    rates = [report[t]["fire_rate"] for t in TIERS if report[t]["share"] >= 0.01]
+    if any(b < a for a, b in zip(rates, rates[1:])) or (rates and rates[-1] <= rates[0]):
+        out.append(f"fire rate does not rise with tier ({rates})")
+    return out

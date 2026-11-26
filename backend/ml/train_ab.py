@@ -21,7 +21,7 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import roc_auc_score, brier_score_loss
 
-from ml.train_monotonic import train_monotonic, FEATURE_COLS
+from ml.train_monotonic import train_monotonic, FEATURE_COLS, MIN_INPUT_EFFECT, tier_report, tier_failures
 from routes.ml_ingest import EVENT_KEYS, WEATHER_SOURCES, RTMA_GUST_FROM
 
 WEATHERAPP = "ml/training_data/weather_app_plan/california_weatherapp.csv"
@@ -70,6 +70,24 @@ def _cv(d, label, group, cols, cst, k=5):
     return p
 
 
+def input_effects(d, label, cols, cst):
+    """Every-input-matters check on a model fit to all rows: average risk swept
+    over each input's 5th-95th percentile on real rows (ml.train_monotonic gate)."""
+    keep = [i for i, c in enumerate(cols) if d[c].notna().any()]
+    cols, cst = [cols[i] for i in keep], [cst[i] for i in keep]
+    m, s = train_monotonic(d[cols].values, d[label].values, monotonic_cst=cst)
+    ref = d[cols].sample(min(400, len(d)), random_state=0).values
+    out = {}
+    for i, c in enumerate(cols):
+        lo, hi = np.nanpercentile(d[c], [5, 95])
+        r = []
+        for v in np.linspace(lo, hi, 15):
+            z = ref.copy(); z[:, i] = v
+            r.append(m.predict_proba(s.transform(z))[:, 1].mean())
+        out[c] = round(float(max(r) - min(r)), 3)
+    return {"effects": out, "weak (< %s)" % MIN_INPUT_EFFECT: [c for c, e in out.items() if e < MIN_INPUT_EFFECT]}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--weights")
@@ -91,6 +109,9 @@ def main():
         p = _cv(d, "fire", pair_year // 5, cols, cst)
         out[name]["where (vs random spots)"] = _metrics(sp["fire"], p[sp.index])
         out[name]["when (vs same spot)"] = _metrics(tp["fire"], p[tp.index])
+        tiers = tier_report(p.values, d["fire"].values)
+        out[name]["tiers (held-out years)"] = {"report": tiers, "failures": tier_failures(tiers)}
+        out[name]["inputs"] = input_effects(d, "fire", cols, cst)
     try:
         g = blend_events(pd.read_csv(a.growth, low_memory=False), weights)
     except FileNotFoundError:
@@ -102,7 +123,8 @@ def main():
         by = b["acq_date"].str[:4].astype(int) // 5
         out["B rows"] = {"large": int(b["large"].sum()), "not large": int((1 - b["large"]).sum())}
         for name, cols, cst in (("B base 6", FEATURE_COLS, CST[:6]), ("B + events", COLS, CST)):
-            out[name] = _metrics(b["large"], _cv(b, "large", by, cols, cst))
+            pb = _cv(b, "large", by, cols, cst)
+            out[name] = {**_metrics(b["large"], pb), "inputs": input_effects(b, "large", cols, cst)}
         gust = b[b["gust_event"].notna()]
         if gust["large"].nunique() == 2:
             out["B + events, gust era only"] = _metrics(gust["large"], _cv(gust, "large", gust["acq_date"].str[:4], COLS, CST))
