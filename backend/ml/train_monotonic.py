@@ -45,7 +45,7 @@ HGB_PARAMS = dict(
 )
 
 
-def train_monotonic(X, y, calibrate=True):
+def train_monotonic(X, y, calibrate=True, monotonic_cst=None):
     """Fit StandardScaler + monotonic HGB, optionally isotonic-calibrated.
 
     StandardScaler has a strictly-positive scale_, so the monotonic direction is
@@ -59,7 +59,8 @@ def train_monotonic(X, y, calibrate=True):
     y = np.asarray(y)
     scaler = StandardScaler().fit(X)
     Xs = scaler.transform(X)
-    base = HistGradientBoostingClassifier(monotonic_cst=MONOTONIC_CST, **HGB_PARAMS)
+    base = HistGradientBoostingClassifier(
+        monotonic_cst=MONOTONIC_CST if monotonic_cst is None else monotonic_cst, **HGB_PARAMS)
     if not calibrate:
         base.fit(Xs, y)
         return base, scaler

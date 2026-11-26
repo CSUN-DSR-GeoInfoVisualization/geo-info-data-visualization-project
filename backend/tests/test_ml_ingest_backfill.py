@@ -111,11 +111,13 @@ def test_archive_window_never_requests_future_dates(monkeypatch):
 def test_raw_per_source_values_are_kept(monkeypatch):
     _stub_static(monkeypatch)
     _sources(monkeypatch)
+    monkeypatch.setattr(ml_ingest, "_event_sources", lambda *a: {"era5": {"gust_event": 9.0}, "rtma": {"gust_event": 11.0}})
     raw = {}
     feats, n = ml_ingest._features_for_historical(37.8, -122.3, "2026-11-06", raw=raw)
     assert n == 3
     assert raw["rtma_humidity"] == 50 and raw["merra2_humidity"] == 45.0 and raw["era5_humidity"] == 40
-    assert set(raw) == set(ml_ingest.RAW_WEATHER_COLS)
+    assert set(raw) == set(ml_ingest.RAW_WEATHER_COLS) | {"era5_gust_event", "rtma_gust_event"}
+    assert raw["rtma_gust_event"] == 11.0
 
 
 def test_known_elevation_is_reused_not_fetched(monkeypatch):
