@@ -819,6 +819,10 @@ def prewarm_tiles():
             points.append((round(lat, 2), round(lon, 2)))
             lon += lon_step
         lat += lat_step
+    # Only tiles on California land: the bbox is ~60% ocean/NV/AZ/Mexico, where EVI
+    # never exists, so those tiles were re-fetched (and failed) on every run.
+    from ml.geo_checks import on_ca_land
+    points = [p for p in points if on_ca_land(*p)]
 
     wrote = 0
     failed = 0
