@@ -330,7 +330,7 @@ WEATHER_SOURCES = ("rtma", "era5", "merra2")
 RAW_WEATHER_COLS = [f"{s}_{k}" for s in WEATHER_SOURCES for k in ("temperature_celsius", "humidity", "wind_speed")]
 
 
-def _features_for_historical(lat, lon, date_str, raw=None):
+def _features_for_historical(lat, lon, date_str, raw=None, elevation=None):
     """EVERY time-varying feature as it was on `date_str` — weather, vegetation
     and drought. Used to build matched control rows a year back, where reusing
     today's EVI or KBDI would pair last year's wind with this year's drought and
@@ -372,7 +372,7 @@ def _features_for_historical(lat, lon, date_str, raw=None):
         "air_temp_encoded": (wx["temperature_celsius"] + 273.15) / 0.02,
         "wind": wx["wind_speed"],
         "humidity": wx["humidity"],
-        "elevation": float(get_elevation(lat, lon)),
+        "elevation": float(elevation if elevation is not None else get_elevation(lat, lon)),
         "kbdi": float(get_kbdi_at(lat, lon, date_str)),
     }, len(sources)
 
