@@ -11,6 +11,7 @@ import os
 import sys
 import threading
 import time
+from collections import defaultdict
 from functools import lru_cache
 
 import requests
@@ -43,11 +44,23 @@ def _get(params, timeout=30):
         time.sleep(wait)
 
 
-@lru_cache(maxsize=4096)
+_key_locks = defaultdict(threading.Lock)
+
+
 def window(lat, lon, date_str):
-    """{param: {YYYYMMDD: value}} for date-29 .. date+3 (-999 = missing)."""
+    """{param: {YYYYMMDD: value}} for date-29 .. date+3 (-999 = missing). Callers in
+    parallel threads wait for one request instead of each sending their own."""
+    with _key_locks[(lat, lon, date_str)]:
+        return _window(lat, lon, date_str)
+
+
+@lru_cache(maxsize=4096)
+def _window(lat, lon, date_str):
     t = dt.datetime.strptime(date_str, "%Y-%m-%d")
     r = _get({"parameters": PARAMS, "community": "AG", "latitude": lat, "longitude": lon, "format": "JSON",
               "start": (t - dt.timedelta(days=29)).strftime("%Y%m%d"),
               "end": (t + dt.timedelta(days=3)).strftime("%Y%m%d")})
     return r.json()["properties"]["parameter"]
+
+
+window.cache_clear = _window.cache_clear  # tests reset the cache
