@@ -357,7 +357,8 @@ def _weather_sources(lat, lon, date_str):
 # per-source readings and blended at training time by measured skill.
 EVENT_KEYS = ("gust_event", "offshore_event", "rh_min_event", "vpd_max_event", "rain_7d")
 RAW_EVENT_COLS = [f"{s}_{k}" for s in WEATHER_SOURCES for k in EVENT_KEYS]
-WEATHERAPP_COLS = WEATHERAPP_COLS + RAW_EVENT_COLS
+from ml.fire_danger import DANGER_COLS  # noqa: E402  (fire-danger raw columns)
+WEATHERAPP_COLS = WEATHERAPP_COLS + RAW_EVENT_COLS + DANGER_COLS
 RTMA_GUST_FROM = "2014-02-01"  # RTMA GUST band is empty before this (verified in Earth Engine 2026-11-26)
 OFFSHORE_FROM_DEG = 45.0       # wind FROM the north-east: Santa Ana / Diablo direction
 
@@ -488,13 +489,17 @@ def _features_for_historical(lat, lon, date_str, raw=None, elevation=None):
     from data.live_elevation import get_elevation
     from data.live_kbdi import get_kbdi_at
     from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=2) as ex:  # event readings in parallel: no added latency
+    from ml.fire_danger import danger_sources
+    with ThreadPoolExecutor(max_workers=3) as ex:  # event + fire-danger readings in parallel: no added latency
         f_ev = ex.submit(_event_sources, lat, lon, date_str) if raw is not None else None
+        f_fd = ex.submit(danger_sources, lat, lon, date_str) if raw is not None else None
         sources = _weather_sources(lat, lon, date_str)
         events = f_ev.result() if f_ev else {}
+        danger = f_fd.result() if f_fd else {}
     if raw is not None:  # caller wants each source's own reading (missing source = absent)
         raw.update({f"{n}_{k}": x for n, v in sources.items() for k, x in v.items()})
         raw.update({f"{n}_{k}": x for n, v in events.items() for k, x in v.items()})
+        raw.update(danger)
     if len(sources) < 2:  # one source has nothing to cross-check it against
         raise RuntimeError(f"only {len(sources)} weather source(s) ({', '.join(sources) or 'none'}) on {date_str}; need 2")
     wx, notes = _blend_weather(sources)

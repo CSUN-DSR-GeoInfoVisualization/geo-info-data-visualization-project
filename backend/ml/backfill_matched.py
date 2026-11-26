@@ -281,6 +281,13 @@ def merge(args):
     >=2 weather sources. Never drops a row except an exact duplicate."""
     from routes import ml_ingest as mi
     raw, events = {}, {}
+    from ml.fire_danger import DANGER_COLS
+    for p in getattr(args, "danger", None) or []:  # fire-danger columns: additive, never over a value already there
+        with open(p, newline="") as f:
+            for r in csv.DictReader(f):
+                v = {c: r[c] for c in DANGER_COLS if r.get(c)}
+                if v:
+                    events.setdefault(_key(r), {}).update(v)
     for p in args.raw or []:
         with open(p, newline="") as f:
             for r in csv.DictReader(f):
@@ -289,7 +296,7 @@ def merge(args):
                     raw[k] = {c: r[c] for c in mi.RAW_WEATHER_COLS}
                 ev = {c: r[c] for c in mi.RAW_EVENT_COLS if r.get(c)}
                 if ev:
-                    events[k] = ev
+                    events.setdefault(k, {}).update(ev)
     rows, seen = [], set()
     for p in args.inp:
         with open(p, newline="") as f:
@@ -300,8 +307,8 @@ def merge(args):
                 seen.add(k)
                 if not any(r.get(c) for c in mi.RAW_WEATHER_COLS) and k in raw:
                     r.update(raw[k])
-                if not any(r.get(c) for c in mi.RAW_EVENT_COLS) and k in events:
-                    r.update(events[k])
+                if k in events:
+                    r.update({c: v for c, v in events[k].items() if not r.get(c)})
                 rows.append(r)
     # sensor of a control = its fire's (same point); a row without its partner (the
     # original dataset has some) is kept, additive, with the sensor of its date
@@ -559,6 +566,53 @@ def growth_set(args):
     print(f"done {stats} -> {args.out}")
 
 
+def fire_danger(args):
+    """Fire-danger columns (ml.fire_danger) for existing rows, additive: one gridMET +
+    terrain call per date for all that date's rows, our NFDRS fuel moisture per row.
+    Resumable by (lat, lon, acq_date, fire); --part i/n shards by date."""
+    from concurrent.futures import ThreadPoolExecutor
+    from ml import fire_danger as fd
+    with open(args.inp, newline="") as f:
+        rows = list(csv.DictReader(f))
+    done = set()
+    if os.path.exists(args.out):
+        with open(args.out, newline="") as f:
+            done = {_key(r) for r in csv.DictReader(f)}
+    i, n = map(int, args.part.split("/"))
+    by_date = {}
+    for r in rows:
+        if _key(r) not in done:
+            by_date.setdefault(r["acq_date"], []).append(r)
+    dates = [x for k, x in enumerate(sorted(by_date)) if k % n == i]
+    cols = ["lat", "lon", "acq_date", "fire"] + fd.DANGER_COLS
+    new_file = not os.path.exists(args.out)
+    out = open(args.out, "a", newline="")
+    w = csv.DictWriter(out, fieldnames=cols, extrasaction="ignore")
+    if new_file:
+        w.writeheader()
+    stats = {"rows": 0, "gridmet_failed": 0}
+    with ThreadPoolExecutor(4) as ex:
+        for k, date in enumerate(dates):
+            grp = by_date[date]
+            try:
+                gm = fd.gridmet_at(date, [(j, float(r["lat"]), float(r["lon"])) for j, r in enumerate(grp)])
+            except Exception as e:
+                print(f"{date} gridMET failed: {e}"[:200], file=sys.stderr, flush=True)
+                gm, stats["gridmet_failed"] = {}, stats["gridmet_failed"] + 1
+            try:
+                own = list(ex.map(lambda r: fd.era5_fuel(float(r["lat"]), float(r["lon"]), date), grp))
+            except RateLimited:
+                raise SystemExit(f"STOPPED at {date}: Open-Meteo is rate-limiting us. Rerun to resume.")
+            for j, (r, o) in enumerate(zip(grp, own)):
+                w.writerow({"lat": r["lat"], "lon": r["lon"], "acq_date": date, "fire": r["fire"], **gm.get(str(j), {}), **o})
+                stats["rows"] += 1
+            if k % 25 == 0:
+                out.flush()
+                print(f"{k}/{len(dates)} dates {stats}", flush=True)
+    out.close()
+    print(f"done {stats} -> {args.out}")
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -580,6 +634,7 @@ if __name__ == "__main__":
     e = sub.add_parser("merge")
     e.add_argument("--inp", nargs="+", required=True)
     e.add_argument("--raw", nargs="*")
+    e.add_argument("--danger", nargs="*")
     e.add_argument("--out", required=True)
     g = sub.add_parser("label-size")
     g.add_argument("--inp", required=True)
@@ -595,5 +650,9 @@ if __name__ == "__main__":
     j.add_argument("--out", required=True)
     j.add_argument("--cache", default="perimeter_cache")
     j.add_argument("--part", default="0/1")
+    q = sub.add_parser("fire-danger")
+    q.add_argument("--inp", required=True)
+    q.add_argument("--out", required=True)
+    q.add_argument("--part", default="0/1")
     args = ap.parse_args()
-    {"growth-set": growth_set, "spatial": spatial, "label-size": label_size, "fill": fill, "regrade": regrade, "static-mask": static_mask, "raw": raw_readings, "merge": merge}[args.cmd](args)
+    {"fire-danger": fire_danger, "growth-set": growth_set, "spatial": spatial, "label-size": label_size, "fill": fill, "regrade": regrade, "static-mask": static_mask, "raw": raw_readings, "merge": merge}[args.cmd](args)

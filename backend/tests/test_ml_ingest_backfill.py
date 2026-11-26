@@ -112,11 +112,13 @@ def test_raw_per_source_values_are_kept(monkeypatch):
     _stub_static(monkeypatch)
     _sources(monkeypatch)
     monkeypatch.setattr(ml_ingest, "_event_sources", lambda *a: {"era5": {"gust_event": 9.0}, "rtma": {"gust_event": 11.0}})
+    import ml.fire_danger as fd
+    monkeypatch.setattr(fd, "danger_sources", lambda *a: {"gridmet_fm100": 7.0, "era5_fm100": 8.0})
     raw = {}
     feats, n = ml_ingest._features_for_historical(37.8, -122.3, "2026-11-06", raw=raw)
     assert n == 3
     assert raw["rtma_humidity"] == 50 and raw["merra2_humidity"] == 45.0 and raw["era5_humidity"] == 40
-    assert set(raw) == set(ml_ingest.RAW_WEATHER_COLS) | {"era5_gust_event", "rtma_gust_event"}
+    assert set(raw) == set(ml_ingest.RAW_WEATHER_COLS) | {"era5_gust_event", "rtma_gust_event", "gridmet_fm100", "era5_fm100"}
     assert raw["rtma_gust_event"] == 11.0
 
 
