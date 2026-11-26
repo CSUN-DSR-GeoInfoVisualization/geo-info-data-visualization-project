@@ -281,11 +281,11 @@ def merge(args):
     >=2 weather sources. Never drops a row except an exact duplicate."""
     from routes import ml_ingest as mi
     raw, events = {}, {}
-    from ml.fire_danger import DANGER_COLS
+    from ml.fire_danger import DANGER_COLS, BENCH_COLS
     for p in getattr(args, "danger", None) or []:  # fire-danger columns: additive, never over a value already there
         with open(p, newline="") as f:
             for r in csv.DictReader(f):
-                v = {c: r[c] for c in DANGER_COLS if r.get(c)}
+                v = {c: r[c] for c in DANGER_COLS + BENCH_COLS if r.get(c)}
                 if v:
                     events.setdefault(_key(r), {}).update(v)
     for p in args.raw or []:
@@ -323,7 +323,7 @@ def merge(args):
             raise SystemExit(f"refusing {_key(r)}: {r['n_weather_sources']} weather source(s)")
     rows.sort(key=lambda r: (r["acq_date"], r["lat"], r["lon"], r["fire"]))
     with open(args.out, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=mi.WEATHERAPP_COLS + ["pair_of"], extrasaction="ignore")
+        w = csv.DictWriter(f, fieldnames=mi.WEATHERAPP_COLS + BENCH_COLS + ["pair_of"], extrasaction="ignore")
         w.writeheader()
         w.writerows(rows)
     no_raw = sum(not any(r.get(c) for c in mi.RAW_WEATHER_COLS) for r in rows)
@@ -584,7 +584,7 @@ def fire_danger(args):
         if _key(r) not in done:
             by_date.setdefault(r["acq_date"], []).append(r)
     dates = [x for k, x in enumerate(sorted(by_date)) if k % n == i]
-    cols = ["lat", "lon", "acq_date", "fire"] + fd.DANGER_COLS
+    cols = ["lat", "lon", "acq_date", "fire"] + fd.DANGER_COLS + fd.BENCH_COLS
     new_file = not os.path.exists(args.out)
     out = open(args.out, "a", newline="")
     w = csv.DictWriter(out, fieldnames=cols, extrasaction="ignore")
