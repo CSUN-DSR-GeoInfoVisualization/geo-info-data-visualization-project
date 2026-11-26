@@ -445,13 +445,20 @@ def fire_data():
     # Fetch FIRMS VIIRS data for California bounding box
     if FIRMS_MAP_KEY:
         try:
-            url = (
-                f"{FIRMS_BASE}/{FIRMS_MAP_KEY}/VIIRS_SNPP_NRT"
-                f"/-124,32,-114,42/{min(days, 10)}"  # NRT area API: the last 1-10 days
-            )
-            r = requests.get(url, timeout=30)
-            r.raise_for_status()
-            lines = r.text.strip().split('\n')
+            # FIRMS's area API takes 1-5 days per request (it rejects more since Nov 2026), so
+            # longer windows come in 5-day chunks. NOAA-20: the S-NPP NRT feed went dark Nov 2026.
+            import datetime as _dt
+            want, back, lines = min(days, 10), 0, []
+            while want > 0:
+                n = min(want, 5)
+                url = f"{FIRMS_BASE}/{FIRMS_MAP_KEY}/VIIRS_NOAA20_NRT/-124,32,-114,42/{n}"
+                if back:  # older chunk: n days starting `back + n - 1` days ago
+                    url += f"/{_dt.datetime.utcnow().date() - _dt.timedelta(days=back + n - 1)}"
+                r = requests.get(url, timeout=30)
+                r.raise_for_status()
+                chunk = r.text.strip().split('\n')
+                lines += chunk if not lines else chunk[1:]
+                want, back = want - n, back + n
             if len(lines) > 1:
                 headers = lines[0].split(',')
                 lat_i = headers.index('latitude') if 'latitude' in headers else None
