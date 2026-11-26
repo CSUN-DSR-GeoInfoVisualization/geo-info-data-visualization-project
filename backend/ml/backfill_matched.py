@@ -518,9 +518,9 @@ def growth_set(args):
                 try:
                     r = requests.get(url, timeout=90)
                     r.raise_for_status()
-                    time.sleep(0.4)  # FIRMS: 5,000 requests per 10 minutes per key
+                    time.sleep(3)  # FIRMS allows 5,000 transactions / 10 min per key, shared with the live site
                 except Exception as e:
-                    print(f"{fid} FIRMS failed: {e}"[:300], file=sys.stderr, flush=True)
+                    print(f"{fid} FIRMS failed: {str(e).replace(key, '<key>')}"[:300], file=sys.stderr, flush=True)
                     stats["failed"] += 1
                     continue
                 hits = []
