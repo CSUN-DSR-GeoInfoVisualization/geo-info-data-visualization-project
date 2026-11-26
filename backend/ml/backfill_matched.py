@@ -195,7 +195,9 @@ def regrade(args):
         for i, r in enumerate(rows):
             try:
                 raw = {}
-                feats, n = mi._features_for_historical(float(r["lat"]), float(r["lon"]), r["acq_date"], raw=raw)
+                # elevation is static and already on the row: reuse it rather than re-fetch
+                feats, n = mi._features_for_historical(float(r["lat"]), float(r["lon"]), r["acq_date"], raw=raw,
+                                                       elevation=float(r["elevation"]))
                 r = {**r, "air_temp_encoded": feats["air_temp_encoded"], "wind": feats["wind"], "humidity": feats["humidity"],
                      "n_weather_sources": n, **{c: raw.get(c) for c in mi.RAW_WEATHER_COLS}}
                 kept.append(r)

@@ -116,3 +116,12 @@ def test_raw_per_source_values_are_kept(monkeypatch):
     assert n == 3
     assert raw["rtma_humidity"] == 50 and raw["merra2_humidity"] == 45.0 and raw["era5_humidity"] == 40
     assert set(raw) == set(ml_ingest.RAW_WEATHER_COLS)
+
+
+def test_known_elevation_is_reused_not_fetched(monkeypatch):
+    _stub_static(monkeypatch)
+    _sources(monkeypatch)
+    import data.live_elevation as le
+    monkeypatch.setattr(le, "get_elevation", lambda *a: (_ for _ in ()).throw(RuntimeError("both elevation sources down")))
+    feats, n = ml_ingest._features_for_historical(37.8, -122.3, "2026-11-06", elevation=123.0)
+    assert feats["elevation"] == 123.0
