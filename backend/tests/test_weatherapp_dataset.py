@@ -77,3 +77,14 @@ def test_merge_refuses_single_source(tmp_path):
     _write(tmp_path / "a.csv", rows, cols)
     with pytest.raises(SystemExit, match="refusing"):
         bm.merge(argparse.Namespace(inp=[tmp_path / "a.csv"], raw=None, out=tmp_path / "o.csv"))
+
+
+def test_every_input_must_matter():
+    from ml.train_monotonic import gate_passes, weak_features
+    rep = {"evi": {"ok": True, "range": 0.15}, "air_temp_encoded": {"ok": True, "range": 0.013},
+           "wind": {"ok": True, "range": None}}
+    assert weak_features(rep, 0.05) == ["air_temp_encoded", "wind"]  # unmeasured counts as weak
+    assert gate_passes(rep) is True                 # direction-only (old behaviour) still available
+    assert gate_passes(rep, 0.05) is False
+    rep["wind"]["ok"] = False
+    assert gate_passes(rep) is False

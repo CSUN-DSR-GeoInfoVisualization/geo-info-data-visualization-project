@@ -33,7 +33,7 @@ from sklearn.metrics import roc_auc_score, brier_score_loss, accuracy_score
 
 from ml.train_monotonic import (
     train_monotonic, validate_monotonicity, gate_passes, dead_constrained_features,
-    FEATURE_COLS, MONOTONIC_CST,
+    weak_features, MIN_INPUT_EFFECT, FEATURE_COLS, MONOTONIC_CST,
 )
 from ml.geo_checks import on_ca_land
 
@@ -165,6 +165,14 @@ def _load_dataset():
     return df, desc
 
 
+def _physics_failures(report):
+    """Feature names that fail physics: wrong direction, or (every input must
+    matter) an average effect below MIN_INPUT_EFFECT, named with its effect."""
+    wrong = [n for n, v in report.items() if not v["ok"]]
+    weak = [f"{n} (effect {report[n]['range']} < {MIN_INPUT_EFFECT})" for n in weak_features(report)]
+    return wrong + weak
+
+
 def decide(cand_m, cand_phys_ok, cand_bad_features, prod_m, prod_phys_ok):
     """Pure gate decision. Returns (promote: bool, reasons: list[str]).
 
@@ -237,9 +245,9 @@ def evaluate(now_iso):
     if cutoff is None:
         # No production model to beat: train on everything, promote on physics.
         cand, cand_scaler = train_monotonic(X, y)
-        cand_phys = validate_monotonicity(cand, cand_scaler)
-        cand_phys_ok = gate_passes(cand_phys)
-        bad = [n for n, v in cand_phys.items() if not v["ok"]]
+        cand_phys = validate_monotonicity(cand, cand_scaler, X_ref=X)
+        cand_phys_ok = gate_passes(cand_phys, MIN_INPUT_EFFECT)
+        bad = _physics_failures(cand_phys)
         promote, reasons = decide(None, cand_phys_ok, bad, None, None)
         return {
             "when": now_iso, "dataset": dataset_desc, "rows": int(len(df)),
@@ -268,9 +276,9 @@ def evaluate(now_iso):
     # Candidate is trained ONLY on rows at or before the cutoff, so the holdout
     # is unseen by both models and the comparison is symmetric.
     cand, cand_scaler = train_monotonic(tr[FEATURE_COLS].values, tr["fire"].values)
-    cand_phys = validate_monotonicity(cand, cand_scaler)
-    cand_phys_ok = gate_passes(cand_phys)
-    bad = [n for n, v in cand_phys.items() if not v["ok"]]
+    cand_phys = validate_monotonicity(cand, cand_scaler, X_ref=tr[FEATURE_COLS].values)
+    cand_phys_ok = gate_passes(cand_phys, MIN_INPUT_EFFECT)
+    bad = _physics_failures(cand_phys)
     dead = dead_constrained_features(cand_phys)
 
     # Not enough new data to judge: hold. Never silently reject on thin evidence
@@ -292,7 +300,7 @@ def evaluate(now_iso):
     cand_m = _metrics(cand, cand_scaler, Xte, yte)
     pm, ps = joblib.load(_MODEL_OUT), joblib.load(_SCALER_OUT)
     prod_m = _metrics(pm, ps, Xte, yte)
-    prod_phys_ok = gate_passes(validate_monotonicity(pm, ps))
+    prod_phys_ok = gate_passes(validate_monotonicity(pm, ps, X_ref=tr[FEATURE_COLS].values), MIN_INPUT_EFFECT)
 
     promote, reasons = decide(cand_m, cand_phys_ok, bad, prod_m, prod_phys_ok)
     if dead:
