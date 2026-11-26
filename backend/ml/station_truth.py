@@ -12,6 +12,7 @@ import argparse
 import csv
 import datetime as dt
 import io
+import math
 import os
 import statistics as st
 import sys
@@ -26,7 +27,11 @@ RANGE = {"temperature_celsius": (-40, 55), "humidity": (1, 100), "wind_speed": (
 SPIKE = {"temperature_celsius": 10.0, "humidity": 40.0, "wind_speed": 20.0}  # vs both neighbours
 MIN_OBS = 18  # same completeness rule as ml.weather_skill._daily
 COLS = ["station", "date", "lat", "lon", "elevation", "county", "wfo",
-        "temperature_celsius", "humidity", "wind_speed", "n_temp", "n_rh", "n_wind", "qc_dropped"]
+        "temperature_celsius", "humidity", "wind_speed", "n_temp", "n_rh", "n_wind", "qc_dropped",
+        # event-day truth (Gust Backfill Plan G0): day's peak gust (max of reported gusts and
+        # sustained winds: ASOS reports a gust only when gusty), max offshore push, min RH,
+        # max VPD, precipitation (only with >= MIN_OBS hourly reports)
+        "gust_max", "offshore_max", "rh_min", "vpd_max", "precip_mm"]
 
 
 def stations():
@@ -63,6 +68,26 @@ def daily(rows):
             series["humidity"].append((r["valid"], float(r["relh"])))
         if r["sknt"]:
             series["wind_speed"].append((r["valid"], float(r["sknt"]) * 0.5144))
+    ev = defaultdict(lambda: {"gust": [], "off": [], "rh": [], "vpd": [], "p": [], "n": 0})
+    for r in rows:
+        e = ev[r["valid"][:10]]
+        sk = float(r["sknt"]) * 0.5144 if r["sknt"] else None
+        if sk is not None and RANGE["wind_speed"][0] <= sk <= RANGE["wind_speed"][1]:
+            e["gust"].append(sk)
+            if r.get("drct"):
+                e["off"].append(sk * math.cos(math.radians(float(r["drct"]) - 45)))
+        if r.get("gust"):
+            g = float(r["gust"]) * 0.5144
+            if g <= RANGE["wind_speed"][1]:
+                e["gust"].append(g)
+        if r["tmpf"] and r["relh"]:
+            tc, rh = (float(r["tmpf"]) - 32) / 1.8, float(r["relh"])
+            if RANGE["temperature_celsius"][0] <= tc <= RANGE["temperature_celsius"][1] and 1 <= rh <= 100:
+                es = 0.6108 * math.exp(17.27 * tc / (tc + 237.3))
+                e["rh"].append(rh); e["vpd"].append(es * (1 - rh / 100))
+                e["n"] += 1
+        if r.get("p01i") not in (None, "", "M"):
+            e["p"].append(float(r["p01i"]) * 25.4)
     days = defaultdict(lambda: {k: [] for k in RANGE})
     drops = defaultdict(int)
     for k, obs in series.items():
@@ -79,6 +104,12 @@ def daily(rows):
             vals = v[k]
             flat = k != "wind_speed" and len(vals) >= MIN_OBS and max(vals) == min(vals)  # calm all day is real
             rec[k] = round(agg(vals), 3) if len(vals) >= MIN_OBS and not flat else ""
+        e = ev[d]
+        full = e["n"] >= MIN_OBS
+        rec.update({"gust_max": round(max(e["gust"]), 2) if len(e["gust"]) >= MIN_OBS else "",
+                    "offshore_max": round(max(e["off"]), 2) if len(e["off"]) >= MIN_OBS else "",
+                    "rh_min": round(min(e["rh"]), 1) if full else "", "vpd_max": round(max(e["vpd"]), 3) if full else "",
+                    "precip_mm": round(sum(e["p"]), 1) if full else ""})
         out[d] = rec
     return out
 
@@ -87,7 +118,7 @@ def fetch_year(sid, year):
     for attempt in range(4):
         try:
             r = requests.get(ASOS, params={
-                "station": sid, "data": ["tmpf", "relh", "sknt"], "tz": "America/Los_Angeles",
+                "station": sid, "data": ["tmpf", "relh", "sknt", "drct", "gust", "p01i"], "tz": "America/Los_Angeles",
                 "format": "onlycomma", "missing": "empty", "report_type": [3, 4],
                 "year1": year, "month1": 1, "day1": 1, "year2": year + 1, "month2": 1, "day2": 1,
             }, timeout=180, headers={"User-Agent": "FireScope/1.0"})

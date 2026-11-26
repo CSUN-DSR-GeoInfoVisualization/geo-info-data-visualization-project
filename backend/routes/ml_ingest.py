@@ -333,7 +333,8 @@ RAW_WEATHER_COLS = [f"{s}_{k}" for s in WEATHER_SOURCES for k in ("temperature_c
 # Tag on every Weather App Plan row: how its weather was made. The trainer refuses
 # rows without it. Bump when WEATHER_WEIGHTS is replaced by a calibration file.
 WEATHER_METHOD = "skill_weighted_v0"
-WEATHERAPP_COLS = ROW_COLS + ["sensor", "pixel_m", "n_weather_sources", "weather_method"] + RAW_WEATHER_COLS
+WEATHERAPP_COLS = (ROW_COLS + ["sensor", "pixel_m", "n_weather_sources", "weather_method", "control_type",
+                               "fire_acres", "fire_start", "fire_id"] + RAW_WEATHER_COLS)
 
 
 def _weather_sources(lat, lon, date_str):
@@ -351,6 +352,126 @@ def _weather_sources(lat, lon, date_str):
     return {n: v for n, v in sources.items() if v}
 
 
+# Event-day fire-weather inputs (Weather App Plan, Model B). Window = the fire day
+# and the day before (Pacific); rain = the 7 days to the fire day. Stored as raw
+# per-source readings and blended at training time by measured skill.
+EVENT_KEYS = ("gust_event", "offshore_event", "rh_min_event", "vpd_max_event", "rain_7d")
+RAW_EVENT_COLS = [f"{s}_{k}" for s in WEATHER_SOURCES for k in EVENT_KEYS]
+WEATHERAPP_COLS = WEATHERAPP_COLS + RAW_EVENT_COLS
+RTMA_GUST_FROM = "2014-02-01"  # RTMA GUST band is empty before this (verified in Earth Engine 2026-11-26)
+OFFSHORE_FROM_DEG = 45.0       # wind FROM the north-east: Santa Ana / Diablo direction
+
+
+def _es(t):  # saturation vapour pressure, kPa (Tetens)
+    import math
+    return 0.6108 * math.exp(17.27 * t / (t + 237.3))
+
+
+def _offshore(speed, from_deg):
+    import math
+    return speed * math.cos(math.radians(from_deg - OFFSHORE_FROM_DEG))
+
+
+def _era5_event(lat, lon, date_str):
+    import datetime as _dt
+    from data.open_meteo import archive
+    t = _dt.date.fromisoformat(date_str)
+    x = archive({"latitude": lat, "longitude": lon, "start_date": str(t - _dt.timedelta(days=6)), "end_date": str(t),
+                 "daily": "wind_gusts_10m_max,wind_speed_10m_max,wind_direction_10m_dominant,"
+                          "relative_humidity_2m_min,vapour_pressure_deficit_max,precipitation_sum",
+                 "wind_speed_unit": "ms", "timezone": "America/Los_Angeles"}, timeout=60).json()["daily"]
+    ev = lambda k: [v for v in x[k][-2:] if v is not None]
+    off = [_offshore(s_, d_) for s_, d_ in zip(x["wind_speed_10m_max"][-2:], x["wind_direction_10m_dominant"][-2:])
+           if s_ is not None and d_ is not None]
+    rain = [v for v in x["precipitation_sum"] if v is not None]
+    out = {"gust_event": max(ev("wind_gusts_10m_max"), default=None), "offshore_event": max(off, default=None),
+           "rh_min_event": min(ev("relative_humidity_2m_min"), default=None),
+           "vpd_max_event": max(ev("vapour_pressure_deficit_max"), default=None),
+           "rain_7d": sum(rain) if len(rain) == 7 else None}
+    return {k: v for k, v in out.items() if v is not None}
+
+
+def _power_event(lat, lon, date_str):
+    """MERRA-2 via POWER, same request as the weather window. No gust. Min RH and
+    max VPD from the day's max temperature and its vapour pressure (QV2M, PS)."""
+    import datetime as _dt
+    from data import nasa_power
+    p = nasa_power.window(lat, lon, date_str)
+    t = _dt.date.fromisoformat(date_str)
+    days = [(t - _dt.timedelta(days=i)).strftime("%Y%m%d") for i in (1, 0)]
+    week = [(t - _dt.timedelta(days=i)).strftime("%Y%m%d") for i in range(7)]
+    ok = lambda k, d: k in p and p[k].get(d, -999.0) != -999.0
+    rh, vpd, off = [], [], []
+    for d in days:
+        if all(ok(k, d) for k in ("QV2M", "PS", "T2M_MAX")):
+            q = p["QV2M"][d] / 1000.0
+            e = q * p["PS"][d] / (0.622 + 0.378 * q)
+            es = _es(p["T2M_MAX"][d])
+            rh.append(min(100.0, 100.0 * e / es)); vpd.append(max(0.0, es - e))
+        if ok("WS10M_MAX", d) and ok("WD10M", d):
+            off.append(_offshore(p["WS10M_MAX"][d], p["WD10M"][d]))
+    out = {"offshore_event": max(off, default=None), "rh_min_event": min(rh, default=None),
+           "vpd_max_event": max(vpd, default=None),
+           "rain_7d": sum(p["PRECTOTCORR"][d] for d in week) if all(ok("PRECTOTCORR", d) for d in week) else None}
+    return {k: v for k, v in out.items() if v is not None}
+
+
+def _rtma_event(lat, lon, date_str):
+    """Hourly RTMA over the two event days (Pacific). No rain (RTMA's precip is not
+    a gauge analysis). Gust only from RTMA_GUST_FROM."""
+    import datetime as _dt
+    from zoneinfo import ZoneInfo
+    from data.live_evi_gee import _ensure_ee_initialized
+    _ensure_ee_initialized()
+    import ee
+    t = _dt.date.fromisoformat(date_str)
+    rows = (ee.ImageCollection("NOAA/NWS/RTMA")
+            .filterDate(f"{t - _dt.timedelta(days=1)}T07:00:00", f"{t + _dt.timedelta(days=1)}T09:00:00")
+            .select(["TMP", "DPT", "WIND", "WDIR", "GUST"])
+            .getRegion(ee.Geometry.Point(lon, lat), 2500).getInfo())
+    h, la = rows[0], ZoneInfo("America/Los_Angeles")
+    want = {str(t - _dt.timedelta(days=1)), str(t)}
+    rh, vpd, off, gust, hours = [], [], [], [], 0
+    for r in rows[1:]:
+        if str(_dt.datetime.fromtimestamp(r[h.index("time")] / 1000, _dt.timezone.utc).astimezone(la).date()) not in want:
+            continue
+        tc, td, w, wd, g = (r[h.index(b)] for b in ("TMP", "DPT", "WIND", "WDIR", "GUST"))
+        if tc is not None and td is not None:
+            hours += 1
+            rh.append(min(100.0, 100.0 * _es(td) / _es(tc))); vpd.append(max(0.0, _es(tc) - _es(td)))
+        if w is not None and wd is not None:
+            off.append(_offshore(w, wd))
+        if g is not None and date_str >= RTMA_GUST_FROM:
+            gust.append(g)
+    if hours < 36:  # most of the 48 hours, or the min/max is not the day's
+        return {}
+    out = {"gust_event": max(gust) if len(gust) >= 36 else None, "offshore_event": max(off, default=None),
+           "rh_min_event": min(rh), "vpd_max_event": max(vpd)}
+    return {k: v for k, v in out.items() if v is not None}
+
+
+def _event_sources(lat, lon, date_str):
+    """{source: {event key: value}}; a source that fails is absent (logged), except
+    RateLimited, which propagates like the weather sources."""
+    from concurrent.futures import ThreadPoolExecutor
+    from data.open_meteo import RateLimited
+    fns = {"era5": _era5_event, "merra2": _power_event, "rtma": _rtma_event}
+    out = {}
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        futs = {n: ex.submit(f, lat, lon, date_str) for n, f in fns.items()}
+        for n, f in futs.items():
+            try:
+                v = f.result()
+            except RateLimited:
+                raise
+            except Exception as e:
+                logger.warning("%s event weather failed @ %.3f,%.3f %s: %s", n, lat, lon, date_str, e)
+                continue
+            if v:
+                out[n] = v
+    return out
+
+
 def _features_for_historical(lat, lon, date_str, raw=None, elevation=None):
     """EVERY time-varying feature as it was on `date_str` — weather, vegetation
     and drought. Used to build matched control rows a year back, where reusing
@@ -366,9 +487,14 @@ def _features_for_historical(lat, lon, date_str, raw=None, elevation=None):
     from data.live_evi import get_evi_at_ornl
     from data.live_elevation import get_elevation
     from data.live_kbdi import get_kbdi_at
-    sources = _weather_sources(lat, lon, date_str)
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=2) as ex:  # event readings in parallel: no added latency
+        f_ev = ex.submit(_event_sources, lat, lon, date_str) if raw is not None else None
+        sources = _weather_sources(lat, lon, date_str)
+        events = f_ev.result() if f_ev else {}
     if raw is not None:  # caller wants each source's own reading (missing source = absent)
         raw.update({f"{n}_{k}": x for n, v in sources.items() for k, x in v.items()})
+        raw.update({f"{n}_{k}": x for n, v in events.items() for k, x in v.items()})
     if len(sources) < 2:  # one source has nothing to cross-check it against
         raise RuntimeError(f"only {len(sources)} weather source(s) ({', '.join(sources) or 'none'}) on {date_str}; need 2")
     wx, notes = _blend_weather(sources)

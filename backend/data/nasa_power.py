@@ -18,7 +18,9 @@ import requests
 from data.open_meteo import RateLimited
 
 URL = "https://power.larc.nasa.gov/api/temporal/daily/point"
-PARAMS = "T2M,RH2M,WS10M_MAX,T2M_MAX,PRECTOTCORR"
+# WD10M/QV2M/PS feed the event-day fire-weather features (offshore push, minimum
+# humidity, VPD); same request, so no extra calls.
+PARAMS = "T2M,RH2M,WS10M_MAX,T2M_MAX,PRECTOTCORR,WD10M,QV2M,PS"
 _lock = threading.Lock()
 _last = [0.0]
 

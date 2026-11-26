@@ -238,7 +238,7 @@ def raw_readings(args):
     if os.path.exists(args.out):
         with open(args.out, newline="") as f:
             done = {_key(r) for r in csv.DictReader(f)}
-    cols = ["lat", "lon", "acq_date", "fire", "raw_n_sources", "reblend_ok"] + mi.RAW_WEATHER_COLS
+    cols = ["lat", "lon", "acq_date", "fire", "raw_n_sources", "reblend_ok"] + mi.RAW_WEATHER_COLS + mi.RAW_EVENT_COLS
     new_file = not os.path.exists(args.out)
     out = open(args.out, "a", newline="")
     w = csv.DictWriter(out, fieldnames=cols)
@@ -250,6 +250,7 @@ def raw_readings(args):
             continue
         try:
             src = mi._weather_sources(float(r["lat"]), float(r["lon"]), r["acq_date"])
+            ev = mi._event_sources(float(r["lat"]), float(r["lon"]), r["acq_date"])
         except RateLimited:
             raise SystemExit(f"STOPPED at row {i}: a weather source is rate-limiting us. Rerun to resume.")
         ok = ""
@@ -263,7 +264,8 @@ def raw_readings(args):
         off += ok == 0
         w.writerow({"lat": r["lat"], "lon": r["lon"], "acq_date": r["acq_date"], "fire": r["fire"],
                     "raw_n_sources": len(src), "reblend_ok": ok,
-                    **{f"{n}_{k}": x for n, v in src.items() for k, x in v.items()}})
+                    **{f"{n}_{k}": x for n, v in src.items() for k, x in v.items()},
+                    **{f"{n}_{k}": x for n, v in ev.items() for k, x in v.items()}})
         if i % 50 == 0:
             out.flush()
             print(f"{i}/{len(rows)} not-reproduced={off}", flush=True)
@@ -278,12 +280,16 @@ def merge(args):
     pixel_m, weather_method) where missing and refuses to write a row without
     >=2 weather sources. Never drops a row except an exact duplicate."""
     from routes import ml_ingest as mi
-    raw = {}
+    raw, events = {}, {}
     for p in args.raw or []:
         with open(p, newline="") as f:
             for r in csv.DictReader(f):
+                k = _key(r)
                 if r["reblend_ok"] == "1":  # only readings that reproduce the stored blend
-                    raw[_key(r)] = {c: r[c] for c in mi.RAW_WEATHER_COLS}
+                    raw[k] = {c: r[c] for c in mi.RAW_WEATHER_COLS}
+                ev = {c: r[c] for c in mi.RAW_EVENT_COLS if r.get(c)}
+                if ev:
+                    events[k] = ev
     rows, seen = [], set()
     for p in args.inp:
         with open(p, newline="") as f:
@@ -294,6 +300,8 @@ def merge(args):
                 seen.add(k)
                 if not any(r.get(c) for c in mi.RAW_WEATHER_COLS) and k in raw:
                     r.update(raw[k])
+                if not any(r.get(c) for c in mi.RAW_EVENT_COLS) and k in events:
+                    r.update(events[k])
                 rows.append(r)
     # sensor of a control = its fire's (same point); a row without its partner (the
     # original dataset has some) is kept, additive, with the sensor of its date
@@ -308,12 +316,247 @@ def merge(args):
             raise SystemExit(f"refusing {_key(r)}: {r['n_weather_sources']} weather source(s)")
     rows.sort(key=lambda r: (r["acq_date"], r["lat"], r["lon"], r["fire"]))
     with open(args.out, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=mi.WEATHERAPP_COLS, extrasaction="ignore")
+        w = csv.DictWriter(f, fieldnames=mi.WEATHERAPP_COLS + ["pair_of"], extrasaction="ignore")
         w.writeheader()
         w.writerows(rows)
     no_raw = sum(not any(r.get(c) for c in mi.RAW_WEATHER_COLS) for r in rows)
     print(f"merged {len(rows)} rows, "
           f"{no_raw} still without raw readings -> {args.out}")
+
+
+def _perimeters(year, cache_dir):
+    """Every mapped perimeter for a year (FRAP + NIFC supplement), via the live API, cached on disk."""
+    import json
+    path = os.path.join(cache_dir, f"perimeters_{year}.json")
+    if not os.path.exists(path):
+        r = requests.get("https://firescope-api.onrender.com/api/history/perimeters",
+                         params={"year": year, "min_acres": 0}, timeout=300)
+        r.raise_for_status()
+        with open(path, "w") as f:
+            json.dump(r.json().get("features", []), f)
+    with open(path) as f:
+        feats = json.load(f)
+    return [(ft, _bbox(ft)) for ft in feats if ft.get("geometry")]
+
+
+def _bbox(ft):
+    xs, ys = [], []
+    def walk(c):
+        if c and isinstance(c[0], (int, float)):
+            xs.append(c[0]); ys.append(c[1])
+        elif c:
+            for x in c:
+                walk(x)
+    walk(ft["geometry"]["coordinates"])
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def label_size(args):
+    """Fire size for every fire row (additive columns): the mapped perimeter that
+    contains the detection and was burning that day (alarm date <= day <= containment
+    + 3 days; same year when undated). fire_acres = 0 means no mapped perimeter
+    (FRAP maps fires from ~10 acres). fire_start = the perimeter's alarm date, so
+    Model B can use only detections near a fire's start."""
+    from data.zone_resolver import _feature_contains
+    os.makedirs(args.cache, exist_ok=True)
+    with open(args.inp, newline="") as f:
+        rd = csv.DictReader(f)
+        cols, rows = rd.fieldnames, list(rd)
+    for c in ("control_type", "fire_acres", "fire_start", "fire_id"):
+        if c not in cols:
+            cols.append(c)
+    iso = lambda ms: dt.datetime.fromtimestamp(ms / 1000, dt.timezone.utc).date().isoformat() if ms else None
+    by_year, n_big = {}, 0
+    for r in rows:
+        r["control_type"] = r.get("control_type") or {"matched_control": "same_place", "same_season_control": "same_season",
+                                                      "spatial_control": "spatial"}.get(r["source"], "")
+        if r["fire"] != "1":
+            continue
+        y = int(r["acq_date"][:4])
+        if y not in by_year:
+            by_year[y] = _perimeters(y, args.cache)
+        la, lo, day = float(r["lat"]), float(r["lon"]), r["acq_date"]
+        best = None
+        for ft, (x0, y0, x1, y1) in by_year[y]:
+            if not (x0 <= lo <= x1 and y0 <= la <= y1) or not _feature_contains(ft, lo, la):
+                continue
+            pr = ft["properties"]
+            a, c = iso(pr.get("ALARM_DATE")), iso(pr.get("CONT_DATE"))
+            if a and not (a <= day <= str(dt.date.fromisoformat(c or a) + dt.timedelta(days=3 if c else 120))):
+                continue
+            if best is None or (a or "") > (iso(best.get("ALARM_DATE")) or ""):
+                best = pr
+        r["fire_acres"] = round(float(best.get("GIS_ACRES") or 0), 1) if best else 0
+        r["fire_start"] = iso(best.get("ALARM_DATE")) or "" if best else ""
+        r["fire_id"] = f"{best.get('FIRE_NAME')}|{best.get('YEAR_')}|{best.get('SOURCE')}" if best else ""
+        n_big += best is not None and float(best.get("GIS_ACRES") or 0) >= 1000
+    with open(args.out, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=cols)
+        w.writeheader()
+        w.writerows(rows)
+    fires = sum(r["fire"] == "1" for r in rows)
+    mapped = sum(1 for r in rows if r["fire"] == "1" and r["fire_id"])
+    print(f"{fires} fire rows: {mapped} inside a mapped perimeter, {n_big} in fires >= 1,000 acres -> {args.out}")
+
+
+def spatial(args):
+    """Random-spot controls (Model A learns WHERE): for each fire row, a random
+    California-land point on the SAME date, more than SPATIAL_MIN_DEG from every
+    fire that day, built by the same feature code as every other row. Resumable;
+    --part i/n shards the fires for parallel runs."""
+    import random
+    from routes import ml_ingest as mi
+    from ml.geo_checks import on_ca_land
+    app = _app()
+    with open(args.inp, newline="") as f:
+        rows = list(csv.DictReader(f))
+    fires = [r for r in rows if r["fire"] == "1"]
+    by_date = {}
+    for r in fires:
+        by_date.setdefault(r["acq_date"], []).append((float(r["lat"]), float(r["lon"])))
+    i, n = map(int, args.part.split("/"))
+    fires = [r for k, r in enumerate(fires) if k % n == i]
+    cols = mi.WEATHERAPP_COLS + ["pair_of"]
+    done = set()
+    if os.path.exists(args.out):
+        with open(args.out, newline="") as f:
+            done = {r["pair_of"] for r in csv.DictReader(f)}
+    new_file = not os.path.exists(args.out)
+    out = open(args.out, "a", newline="")
+    w = csv.DictWriter(out, fieldnames=cols, extrasaction="ignore")
+    if new_file:
+        w.writeheader()
+    stats = {"written": 0, "failed": 0}
+    with app.app_context():
+        for k, r in enumerate(fires):
+            key = f"{r['lat']},{r['lon']},{r['acq_date']}"
+            if key in done:
+                continue
+            rng = random.Random(key)  # reproducible
+            for attempt in range(3):
+                for _ in range(500):
+                    la, lo = rng.uniform(32.5, 42.0), rng.uniform(-124.45, -114.13)
+                    if on_ca_land(la, lo) and all(abs(la - a) > SPATIAL_MIN_DEG or abs(lo - b) > SPATIAL_MIN_DEG
+                                                  for a, b in by_date[r["acq_date"]]):
+                        break
+                else:
+                    continue
+                try:
+                    raw = {}
+                    feats, n_src = mi._features_for_historical(la, lo, r["acq_date"], raw=raw)
+                except RateLimited:
+                    raise SystemExit(f"STOPPED at fire {k}: a weather source is rate-limiting us. Rerun to resume.")
+                except Exception:
+                    continue  # another random point
+                row = {"lat": round(la, 5), "lon": round(lo, 5), "acq_date": r["acq_date"], **feats, "fire": 0,
+                       "source": "spatial_control", "control_type": "spatial", "sensor": r.get("sensor"),
+                       "pixel_m": r.get("pixel_m"), "n_weather_sources": n_src, "weather_method": mi.WEATHER_METHOD,
+                       "pair_of": key, **raw}
+                if mi._row_quality_issue(row):
+                    continue
+                w.writerow(row)
+                stats["written"] += 1
+                break
+            else:
+                stats["failed"] += 1
+            if k % 25 == 0:
+                out.flush()
+                print(f"{k}/{len(fires)} {stats}", flush=True)
+    out.close()
+    print(f"done {stats} -> {args.out}")
+
+
+SPATIAL_MIN_DEG = 0.25  # ~25 km: never a control inside or next to that day's fires
+
+
+def _firms_src(day):
+    if day > SP_ARCHIVE_END:
+        return "VIIRS_NOAA20_NRT"
+    if day < dt.date(2012, 1, 20):
+        return "MODIS_SP"
+    return "VIIRS_SNPP_SP" if day < dt.date(2018, 4, 1) else "VIIRS_NOAA20_SP"
+
+
+def growth_set(args):
+    """Model B ("will it grow large"): one row per mapped California fire, at its
+    earliest confident FIRMS vegetation-fire detection inside the perimeter, from
+    the day before its alarm date to 3 days after. Weather is the start-day
+    weather, so the model learns what makes a fire grow, not what a big fire looks
+    like on day 10. Label = fire_acres (large = >= 1,000 at training time)."""
+    from routes import ml_ingest as mi
+    from data.zone_resolver import _feature_contains
+    app = _app()
+    key = os.environ["FIRMS_MAP_KEY"]
+    i, n = map(int, args.part.split("/"))
+    cols = mi.WEATHERAPP_COLS
+    done = set()
+    if os.path.exists(args.out):
+        with open(args.out, newline="") as f:
+            done = {r["fire_id"] for r in csv.DictReader(f)}
+    new_file = not os.path.exists(args.out)
+    out = open(args.out, "a", newline="")
+    w = csv.DictWriter(out, fieldnames=cols, extrasaction="ignore")
+    if new_file:
+        w.writeheader()
+    stats = {"written": 0, "no_detection": 0, "failed": 0}
+    iso = lambda ms: dt.datetime.fromtimestamp(ms / 1000, dt.timezone.utc).date()
+    k = -1
+    with app.app_context():
+        for year in range(args.start, args.end + 1):
+            for ft, (x0, y0, x1, y1) in _perimeters(year, args.cache):
+                pr = ft["properties"]
+                if not pr.get("ALARM_DATE"):
+                    continue
+                k += 1
+                fid = f"{pr.get('FIRE_NAME')}|{pr.get('YEAR_')}|{pr.get('SOURCE')}|{pr.get('OBJECTID') or pr.get('SOURCE_ID')}"
+                if k % n != i or fid in done:
+                    continue
+                alarm = iso(pr["ALARM_DATE"])
+                start = alarm - dt.timedelta(days=1)
+                url = FIRMS.format(key=key, src=_firms_src(start), days=5, date=start).replace(
+                    "-124.48,32.53,-114.13,42.01", f"{x0:.4f},{y0:.4f},{x1:.4f},{y1:.4f}")
+                try:
+                    r = requests.get(url, timeout=90)
+                    r.raise_for_status()
+                    time.sleep(0.4)  # FIRMS: 5,000 requests per 10 minutes per key
+                except Exception as e:
+                    print(f"{fid} FIRMS failed: {e}"[:300], file=sys.stderr, flush=True)
+                    stats["failed"] += 1
+                    continue
+                hits = []
+                for d in csv.DictReader(io.StringIO(r.text)):
+                    conf = d.get("confidence", "")
+                    ok = int(conf) >= 30 if conf.isdigit() else conf in ("n", "h")
+                    if ok and d.get("type", "0") == "0" and _feature_contains(ft, float(d["longitude"]), float(d["latitude"])):
+                        hits.append((d["acq_date"], d.get("acq_time", ""), float(d["latitude"]), float(d["longitude"])))
+                if not hits:
+                    stats["no_detection"] += 1
+                    continue
+                day, _, la, lo = min(hits)
+                try:
+                    raw = {}
+                    feats, n_src = mi._features_for_historical(la, lo, day, raw=raw)
+                except RateLimited:
+                    raise SystemExit(f"STOPPED at {fid}: a weather source is rate-limiting us. Rerun to resume.")
+                except Exception as e:
+                    print(f"{fid} features failed: {type(e).__name__}: {e}"[:300], file=sys.stderr, flush=True)
+                    stats["failed"] += 1
+                    continue
+                row = {"lat": round(la, 5), "lon": round(lo, 5), "acq_date": day, **feats, "fire": 1,
+                       "source": "perimeter_start", "control_type": "", "n_weather_sources": n_src,
+                       "weather_method": mi.WEATHER_METHOD, "sensor": "MODIS" if _firms_src(start) == "MODIS_SP" else "VIIRS",
+                       "pixel_m": 1000 if _firms_src(start) == "MODIS_SP" else 375,
+                       "fire_acres": round(float(pr.get("GIS_ACRES") or 0), 1), "fire_start": str(alarm), "fire_id": fid, **raw}
+                if mi._row_quality_issue(row):
+                    stats["failed"] += 1
+                    continue
+                w.writerow(row)
+                stats["written"] += 1
+                if stats["written"] % 20 == 0:
+                    out.flush()
+                    print(f"{year} {stats}", flush=True)
+    out.close()
+    print(f"done {stats} -> {args.out}")
 
 
 if __name__ == "__main__":
@@ -338,5 +581,19 @@ if __name__ == "__main__":
     e.add_argument("--inp", nargs="+", required=True)
     e.add_argument("--raw", nargs="*")
     e.add_argument("--out", required=True)
+    g = sub.add_parser("label-size")
+    g.add_argument("--inp", required=True)
+    g.add_argument("--out", required=True)
+    g.add_argument("--cache", default="perimeter_cache")
+    h = sub.add_parser("spatial")
+    h.add_argument("--inp", required=True)
+    h.add_argument("--out", required=True)
+    h.add_argument("--part", default="0/1")
+    j = sub.add_parser("growth-set")
+    j.add_argument("--start", type=int, default=2001)
+    j.add_argument("--end", type=int, default=dt.date.today().year)
+    j.add_argument("--out", required=True)
+    j.add_argument("--cache", default="perimeter_cache")
+    j.add_argument("--part", default="0/1")
     args = ap.parse_args()
-    {"fill": fill, "regrade": regrade, "static-mask": static_mask, "raw": raw_readings, "merge": merge}[args.cmd](args)
+    {"growth-set": growth_set, "spatial": spatial, "label-size": label_size, "fill": fill, "regrade": regrade, "static-mask": static_mask, "raw": raw_readings, "merge": merge}[args.cmd](args)
