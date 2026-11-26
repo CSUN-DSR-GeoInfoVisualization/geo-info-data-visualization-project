@@ -154,12 +154,17 @@ jobs:
                   if key not in seen:
                       seen.add(key)
                       new_rows.append(r)
+              # Each file keeps its own header: the matched set has no provenance columns.
+              fields = cols
+              if exists:
+                  with open(path, newline="") as f:
+                      fields = next(csv.reader(f))
               with open(path, "a", newline="") as f:
-                  w = csv.DictWriter(f, fieldnames=cols)
+                  w = csv.DictWriter(f, fieldnames=fields)
                   if not exists:
                       w.writeheader()
                   for r in new_rows:
-                      w.writerow({c: r.get(c) for c in cols})
+                      w.writerow({c: r.get(c) for c in fields})
               print(f"ingest returned {len(rows)} rows; appended {len(new_rows)} new -> {path}")
           PY
 

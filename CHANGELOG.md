@@ -4,6 +4,28 @@ All notable changes to FireScope are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The authoritative working notes live in
 [`docs/SESSION_HANDOFF.md`](docs/SESSION_HANDOFF.md).
 
+## [Unreleased]
+
+### Added
+- **2001 → present training set** (`backend/ml/training_data/weather_app_plan/california_weatherapp.csv`,
+  29,196 rows): the matched fire / same-place-a-year-earlier design extended back to 2001 (MODIS 1 km
+  labels before 2012, VIIRS 375 m after), merged with every re-checked row. Each row carries
+  `weather_method`, `n_weather_sources`, `sensor`/`pixel_m` and each weather source's raw reading.
+- **Skill-weighted loader gate** (`ml.retrain_and_gate.check_skill_weighted`): the trainer refuses any
+  row whose weather is not tagged as the skill-weighted blend or has fewer than two sources.
+- `ml.backfill_matched raw` (adds raw per-source readings to older rows without changing stored values,
+  and checks they reproduce the stored blend) and `merge` (builds the training set; drops only exact
+  duplicates).
+- `ml.station_truth`: quality-controlled daily truth table from every California ASOS/AWOS station in
+  the Iowa Environmental Mesonet archive (range, spike and stuck-sensor checks), for scoring each
+  weather source per region.
+
+### Changed
+- The trainer reads the 2001 → present set when present. Dry run 2026-11-26 on rows newer than the
+  production model: AUROC 0.598 / Brier 0.247 vs production 0.521 / 0.330 (the old matched set alone:
+  0.561 / 0.364). Not promoted.
+- Daily ingest rows carry the same provenance columns; each training file keeps its own header.
+
 ## [3.3-stable] — 2026-11-25
 
 Training-data integrity, failure alerting, and security hardening.

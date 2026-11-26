@@ -28,7 +28,7 @@ def test_ingest_keeps_complete_pairs_only(monkeypatch):
     monkeypatch.setattr(mi, "_STATIC_SOURCES", set())
     feats = {"evi": 0.3, "air_temp_encoded": 14600.0, "wind": 3.0, "humidity": 40.0, "elevation": 100.0, "kbdi": 50.0}
 
-    def fake(lat, lon, date):
+    def fake(lat, lon, date, raw=None):
         if lat == 37.2 and date.startswith("2025"):
             raise RuntimeError("control failed")  # this fire's control can't be built
         return dict(feats), 3
@@ -38,6 +38,9 @@ def test_ingest_keeps_complete_pairs_only(monkeypatch):
     d = app.test_client().post("/api/internal/ml/ingest?days=1&date=2026-11-10", headers={"X-Internal-Token": "t"}).get_json()
     assert d["fire_rows"] == 1 and d["nofire_rows"] == 1
     assert {(r["lat"], r["fire"]) for r in d["rows"]} == {(36.1, 1), (36.1, 0)}
+    # rows carry what the Weather App Plan trainer requires (ml.retrain_and_gate.check_skill_weighted)
+    assert all(r["weather_method"] == mi.WEATHER_METHOD and r["n_weather_sources"] == 3 for r in d["rows"])
+    assert set(mi.WEATHERAPP_COLS) <= set(d["columns"])
 
 
 def test_dataset_gate_flags_unpaired_recent_fires(tmp_path):
