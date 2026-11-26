@@ -372,7 +372,7 @@ export function SettingsPage({ defaultTab = "profile" }: SettingsPageProps) {
                   />
                   <AboutItem
                     name="deck.gl (v9)"
-                    description="Open-source WebGL-powered geospatial visualization framework by Vis.gl. Renders fire hotspots, risk heatmaps, zone polygons, and fire perimeter overlays with high-performance GPU acceleration."
+                    description="Open-source WebGL-powered geospatial visualization framework by Vis.gl. Renders fire hotspots, zone polygons, and fire perimeter overlays with high-performance GPU acceleration."
                     badge="Open source"
                     badgeColor="bg-gray-100 text-gray-700"
                   />
