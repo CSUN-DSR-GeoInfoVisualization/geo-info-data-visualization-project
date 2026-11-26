@@ -6,7 +6,7 @@
 
 [**Live site → firescope.dev**](https://firescope.dev) · [Architecture](docs/ARCHITECTURE.md) · [Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md)
 
-![live](https://img.shields.io/badge/live-firescope.dev-2d6cdf) ![release](https://img.shields.io/badge/release-v3.3--stable-2e8b57) ![risk model](https://img.shields.io/badge/risk_model-monotonic_HGB_+_physics_gate-b45309) ![license](https://img.shields.io/badge/license-MIT-555) ![CSUN](https://img.shields.io/badge/CSUN-ARCS_senior_project-c8102e)
+![live](https://img.shields.io/badge/live-firescope.dev-2d6cdf) ![release](https://img.shields.io/badge/release-v3.4--stable-2e8b57) ![risk model](https://img.shields.io/badge/risk_model-monotonic_HGB_+_physics_gate-b45309) ![license](https://img.shields.io/badge/license-MIT-555) ![CSUN](https://img.shields.io/badge/CSUN-ARCS_senior_project-c8102e)
 
 </div>
 
@@ -97,16 +97,21 @@ database cost-risk (the dataset lives in-repo):
   disagrees with the other two is dropped. Rows that fail the
   data-quality gate (physical ranges, low-confidence labels, CA-land mask, cross-source agreement)
   are quarantined, never trained on. Daily rows are appended to both the original matched set and
-  the **Weather App Plan** set (`backend/ml/training_data/weather_app_plan/`), which also holds the
-  2018 → present backfill built the same way.
+  the **Weather App Plan** set (`backend/ml/training_data/weather_app_plan/california_weatherapp.csv`),
+  which the model trains on: **2001 → present, 29,000+ rows**, built the same way (MODIS 1 km fire
+  labels before 2012, VIIRS 375 m after). The trainer refuses any row whose weather is not the
+  skill-weighted blend of at least two sources, and each source's raw reading is kept so blends can
+  be re-derived as new sources and stations are added.
 - **Every failure is emailed to the owner**: an hourly digest of each data-source failure, fallback
   and error the API logs; any failed workflow run; an ingest that returns only one class; and
   training data that stops growing for 2 days.
 - **Weekly** the data is scanned for outliers + distribution drift (PSI), the live model is
   back-tested against recent real fires, and cached terrain is cross-checked — with email alerts.
 - **Weekly gated retraining** evaluates a candidate against the physics-hard + AUROC/Brier
-  non-regression gate on a leak-free holdout. Auto-promotion is currently **held in dry-run** while
-  the first matched-control model is reviewed; promotion is manual (`promote=true`).
+  non-regression gate on a leak-free holdout (rows newer than the live model). Scheduled runs are
+  dry-run; promotion is manual (`promote=true`). **Live model (2026-11-26):** trained on the
+  2001 → present set; on 705 held-out rows it scores AUROC 0.594 / Brier 0.249, against 0.521 / 0.328
+  for the model it replaced.
 
 Details in [`backend/ml/README.md`](backend/ml/README.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
@@ -217,7 +222,7 @@ cost-risk) and a candidate only ships if it survives a physics-direction gate:
 %%{init: {'themeVariables': {'edgeLabelBackground': '#ffffff'}, 'themeCSS': '.edgeLabel rect{opacity:1 !important;fill:#ffffff !important;} .edgeLabel,.edgeLabel p,.edgeLabel span,.edgeLabel div{background-color:#ffffff !important;color:#16181d !important;}'}}%%
 flowchart LR
     F["FIRMS detections (6 days back)<br/>+ same-point controls 1 year earlier"] --> EN["observed features<br/>backup source per feature<br/>RTMA + ERA5 + MERRA-2 skill-weighted"]
-    EN --> DS["append to in-repo dataset<br/>california_matched.csv"]
+    EN --> DS["append to in-repo dataset<br/>weather_app_plan/california_weatherapp.csv"]
     DS --> TR["train monotonic candidate"]
     TR --> G{"physics + metric gate"}
     G -->|pass| PR["archive old · promote .pkl"]

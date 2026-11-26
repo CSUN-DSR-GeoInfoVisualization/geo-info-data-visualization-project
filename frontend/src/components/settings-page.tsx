@@ -348,7 +348,7 @@ export function SettingsPage({ defaultTab = "profile" }: SettingsPageProps) {
                   />
                   <AboutItem
                     name="Daily training ingest (NASA FIRMS)"
-                    description="Every day a GitHub Actions workflow (.github/workflows/daily-retrain.yml) pulls NASA FIRMS satellite fire detections from 6 days earlier, so every feature is measured weather rather than a forecast. Each detection is paired with a matched control: the same location on the same date one year earlier. The model therefore learns which conditions lead to fire, not where fires tend to happen. Rows that pass the data-quality checks are appended to the committed training set (backend/ml/training_data/california_matched.csv). It runs all year, so winter conditions accumulate alongside summer fires."
+                    description="Every day a GitHub Actions workflow (.github/workflows/daily-retrain.yml) pulls NASA FIRMS satellite fire detections from 6 days earlier, so every feature is measured weather rather than a forecast. Each detection is paired with a matched control: the same location on the same date one year earlier. The model therefore learns which conditions lead to fire, not where fires tend to happen. Rows that pass the data-quality checks are appended to the committed training set (backend/ml/training_data/weather_app_plan/california_weatherapp.csv), which holds every fire and control from 2001 to the present (29,000+ rows: MODIS satellite labels before 2012, VIIRS after). It runs all year, so winter conditions accumulate alongside summer fires."
                     badge="Cron · daily"
                     badgeColor="bg-amber-100 text-amber-700"
                   />
@@ -360,7 +360,7 @@ export function SettingsPage({ defaultTab = "profile" }: SettingsPageProps) {
                   />
                   <AboutItem
                     name="Weekly monitoring & gated auto-promotion"
-                    description="Every Sunday night the system scans the ingested data for statistical outliers and distribution drift, back-tests the live model against recent real fires, and cross-checks cached terrain data, emailing the team on any problem. It then retrains and evaluates the candidate against the gate (physics monotonicity plus AUROC/Brier non-regression on a leak-free holdout). Automatic promotion is currently paused while the first matched-control model is reviewed by hand."
+                    description="Every Sunday night the system scans the ingested data for statistical outliers and distribution drift, back-tests the live model against recent real fires, and cross-checks cached terrain data, emailing the team on any problem. It then retrains and evaluates the candidate against the gate (physics monotonicity plus AUROC/Brier non-regression on a leak-free holdout). Promotion is done by hand after review; the current model, promoted 2026-11-26 and trained on 2001 to the present, scores AUROC 0.594 on held-out recent fires against 0.521 for the model it replaced."
                     badge="Auto · weekly"
                     badgeColor="bg-red-100 text-red-700"
                   />
