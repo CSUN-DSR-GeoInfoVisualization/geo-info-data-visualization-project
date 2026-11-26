@@ -16,8 +16,15 @@
     0,
     1
   ],
-  "trained_at": "2026-08-17T06:35:17",
-  "dataset": "california_2020_kbdi.csv(1350) + california_daily.csv(767) -343 wind<=0",
-  "rows": 1772,
-  "heldout_auroc": 0.8684051854085016
+  "trained_at": "2026-11-26T19:05:41",
+  "dataset": "california_weatherapp.csv(29217, skill-weighted, 16946 awaiting raw readings)",
+  "rows": 29217,
+  "heldout_auroc": 0.5934943639291465,
+  "holdout": {
+    "cutoff": "2026-08-17",
+    "rows": 705,
+    "positives": 360,
+    "negatives": 345
+  },
+  "promoted_because": "candidate clears physics + metric gate; WARNING: constrained feature(s) with no effect: wind"
 }

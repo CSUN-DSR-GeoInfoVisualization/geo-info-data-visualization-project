@@ -138,3 +138,10 @@
 - production: AUROC=0.9293 Brier=0.0991 physics_ok=True
 - reasons: AUROC regressed 0.9293 -> 0.8829
 
+## 2026-11-26T19:05:41 — PROMOTED
+- dataset: california_weatherapp.csv(29217, skill-weighted, 16946 awaiting raw readings) (29217 rows)
+- holdout: 705 rows newer than 2026-08-17 (360 fire / 345 no-fire)
+- candidate: AUROC=0.5935 Brier=0.2489 recall@High=0.817 physics_ok=True
+- production: AUROC=0.5207 Brier=0.3282 recall@High=0.894 physics_ok=True
+- reasons: candidate clears physics + metric gate; WARNING: constrained feature(s) with no effect: wind
+
