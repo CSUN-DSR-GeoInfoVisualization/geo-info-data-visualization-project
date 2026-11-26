@@ -17,6 +17,9 @@ from ml.fuel_moisture import dead_fuel_moisture
 GRIDMET_BANDS = ("fm100", "fm1000", "pr", "srad", "rmin", "rmax")
 logger = logging.getLogger(__name__)
 DANGER_COLS = [f"gridmet_{b}" for b in GRIDMET_BANDS] + ["era5_fm100", "era5_fm1000", "slope", "aspect"]
+# Reference systems, stored for the benchmark gate ONLY (never model inputs; ml.train_ab enforces it):
+# USFS NFDRS Energy Release Component and Burning Index from gridMET.
+BENCH_COLS = ["bench_erc", "bench_bi"]
 
 
 def _ee():
@@ -33,12 +36,13 @@ def gridmet_at(date_str, points):
     t = dt.date.fromisoformat(date_str)
     gm = ee.ImageCollection("IDAHO_EPSCOR/GRIDMET").filterDate(date_str, str(t + dt.timedelta(days=1))).first()
     terrain = ee.Terrain.products(ee.ImageCollection("USGS/3DEP/10m_collection").mosaic().setDefaultProjection("EPSG:4269", None, 10))
-    img = gm.select(list(GRIDMET_BANDS)).addBands(terrain.select(["slope", "aspect"]))
+    img = gm.select(list(GRIDMET_BANDS) + ["erc", "bi"]).addBands(terrain.select(["slope", "aspect"]))
     fc = ee.FeatureCollection([ee.Feature(ee.Geometry.Point(lon, lat), {"k": str(k)}) for k, lat, lon in points])
     out = {}
     for f in img.reduceRegions(fc, ee.Reducer.first(), 30).getInfo()["features"]:
         p = f["properties"]
-        out[p["k"]] = {**{f"gridmet_{b}": p.get(b) for b in GRIDMET_BANDS}, "slope": p.get("slope"), "aspect": p.get("aspect")}
+        out[p["k"]] = {**{f"gridmet_{b}": p.get(b) for b in GRIDMET_BANDS}, "slope": p.get("slope"), "aspect": p.get("aspect"),
+                       "bench_erc": p.get("erc"), "bench_bi": p.get("bi")}
     return out
 
 

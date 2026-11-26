@@ -59,6 +59,7 @@ def _metrics(y, p):
 
 def _cv(d, label, group, cols, cst, k=5):
     """Out-of-fold predictions with whole groups held out (years or 1-degree places)."""
+    assert not any(c.startswith("bench_") for c in cols), "reference systems are benchmarks, never inputs"
     keep = [i for i, c in enumerate(cols) if d[c].notna().any()]  # an all-blank input can't be learned
     cols, cst = [cols[i] for i in keep], [cst[i] for i in keep]
     p = pd.Series(np.nan, index=d.index)
