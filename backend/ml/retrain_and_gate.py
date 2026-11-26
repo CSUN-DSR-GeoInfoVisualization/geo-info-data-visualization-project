@@ -65,6 +65,29 @@ _DAILY = os.path.join(_TRAIN_DIR, "california_daily.csv")
 # inference actually receives.
 _MATCHED = os.path.join(_TRAIN_DIR, "california_matched.csv")
 
+# Weather App Plan set (2026-11-26): the matched design from 2001 on, every row's
+# weather from the skill-weighted blend, with each source's raw reading kept for
+# recalibration. Preferred over _MATCHED when present, and gated by
+# check_skill_weighted: no amount of data justifies an unweighted row.
+_WEATHERAPP = os.path.join(_TRAIN_DIR, "weather_app_plan", "california_weatherapp.csv")
+SKILL_WEIGHTED_METHODS = {"skill_weighted_v0"}
+
+
+def check_skill_weighted(d):
+    """Raise ValueError unless every row carries a known skill-weighted method tag
+    and >= 2 weather sources, and the raw-reading columns exist. Returns the number
+    of rows still waiting for their raw readings (allowed: the blend is what trains)."""
+    from routes.ml_ingest import RAW_WEATHER_COLS
+    missing = [c for c in ["weather_method", "n_weather_sources"] + RAW_WEATHER_COLS if c not in d.columns]
+    if missing:
+        raise ValueError(f"training file lacks column(s) {missing}")
+    bad_method = ~d["weather_method"].isin(SKILL_WEIGHTED_METHODS)
+    bad_sources = ~(pd.to_numeric(d["n_weather_sources"], errors="coerce") >= 2)
+    if bad_method.any() or bad_sources.any():
+        raise ValueError(f"{int(bad_method.sum())} row(s) without a skill-weighted method tag and "
+                         f"{int(bad_sources.sum())} with < 2 weather sources; refusing to train")
+    return int(d[RAW_WEATHER_COLS].isna().all(axis=1).sum())
+
 AUROC_TOL = 0.005
 BRIER_TOL = 0.005
 
@@ -92,11 +115,16 @@ def _load_dataset():
     Returns (df, description)."""
     frames, parts = [], []
     want = _DB_COLS + _GEO_COLS
-    sources = (_MATCHED,) if os.path.exists(_MATCHED) else (_BASE, _DAILY)
+    sources = next((s for s in ((_WEATHERAPP,), (_MATCHED,)) if os.path.exists(s[0])), (_BASE, _DAILY))
     for path in sources:
         if os.path.exists(path):
             d = pd.read_csv(path)
-            if set(want).issubset(d.columns) and len(d):
+            if path == _WEATHERAPP:
+                no_raw = check_skill_weighted(d)
+                parts.append(f"{os.path.basename(path)}({len(d)}, skill-weighted"
+                             + (f", {no_raw} awaiting raw readings)" if no_raw else ")"))
+                frames.append(d[want])
+            elif set(want).issubset(d.columns) and len(d):
                 frames.append(d[want])
                 parts.append(f"{os.path.basename(path)}({len(d)})")
 

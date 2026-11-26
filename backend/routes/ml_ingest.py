@@ -330,6 +330,27 @@ WEATHER_SOURCES = ("rtma", "era5", "merra2")
 RAW_WEATHER_COLS = [f"{s}_{k}" for s in WEATHER_SOURCES for k in ("temperature_celsius", "humidity", "wind_speed")]
 
 
+# Tag on every Weather App Plan row: how its weather was made. The trainer refuses
+# rows without it. Bump when WEATHER_WEIGHTS is replaced by a calibration file.
+WEATHER_METHOD = "skill_weighted_v0"
+WEATHERAPP_COLS = ROW_COLS + ["sensor", "pixel_m", "n_weather_sources", "weather_method"] + RAW_WEATHER_COLS
+
+
+def _weather_sources(lat, lon, date_str):
+    """Each weather source's own reading on date_str, {name: {k: value}}; a source
+    with no answer is absent. RateLimited propagates."""
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        f_era5 = ex.submit(_weather_for_date, lat, lon, date_str)          # Open-Meteo archive (ERA5)
+        f_merra2 = ex.submit(_power_weather_for_date, lat, lon, date_str)  # NASA POWER (MERRA-2)
+        f_rtma = ex.submit(_rtma_weather_for_date, lat, lon, date_str)     # NOAA RTMA (stations)
+        era5 = f_era5.result()
+        sources = {"rtma": f_rtma.result(), "merra2": f_merra2.result(),
+                   "era5": era5 and {"temperature_celsius": era5["air_temp_encoded"] * 0.02 - 273.15,
+                                     "humidity": era5["humidity"], "wind_speed": era5["wind"]}}
+    return {n: v for n, v in sources.items() if v}
+
+
 def _features_for_historical(lat, lon, date_str, raw=None, elevation=None):
     """EVERY time-varying feature as it was on `date_str` — weather, vegetation
     and drought. Used to build matched control rows a year back, where reusing
@@ -345,16 +366,7 @@ def _features_for_historical(lat, lon, date_str, raw=None, elevation=None):
     from data.live_evi import get_evi_at_ornl
     from data.live_elevation import get_elevation
     from data.live_kbdi import get_kbdi_at
-    from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=3) as ex:
-        f_era5 = ex.submit(_weather_for_date, lat, lon, date_str)          # Open-Meteo archive (ERA5)
-        f_merra2 = ex.submit(_power_weather_for_date, lat, lon, date_str)  # NASA POWER (MERRA-2)
-        f_rtma = ex.submit(_rtma_weather_for_date, lat, lon, date_str)     # NOAA RTMA (stations)
-        era5 = f_era5.result()
-        sources = {"rtma": f_rtma.result(), "merra2": f_merra2.result(),
-                   "era5": era5 and {"temperature_celsius": era5["air_temp_encoded"] * 0.02 - 273.15,
-                                     "humidity": era5["humidity"], "wind_speed": era5["wind"]}}
-    sources = {n: v for n, v in sources.items() if v}
+    sources = _weather_sources(lat, lon, date_str)
     if raw is not None:  # caller wants each source's own reading (missing source = absent)
         raw.update({f"{n}_{k}": x for n, v in sources.items() for k, x in v.items()})
     if len(sources) < 2:  # one source has nothing to cross-check it against
@@ -549,7 +561,8 @@ def ingest():
             if not acq_date:
                 continue
             try:
-                feats, n_sources = _features_for_historical(lat, lon, acq_date)
+                raw = {}
+                feats, n_sources = _features_for_historical(lat, lon, acq_date, raw=raw)
             except CrossSourceMismatch as e:
                 logger.warning("ingest row cross-source mismatch @ %.3f,%.3f: %s", lat, lon, e)
                 cross_dropped.append({"lat": round(lat, 5), "lon": round(lon, 5), "reason": str(e)})
@@ -564,6 +577,9 @@ def ingest():
                 "lat": round(lat, 5), "lon": round(lon, 5), "acq_date": acq_date,
                 **feats, "fire": label,
                 "source": "firms_viirs" if label else "matched_control",
+                # provenance for the Weather App Plan file; the matched file's header ignores these
+                "sensor": "VIIRS", "pixel_m": 375, "n_weather_sources": n_sources,
+                "weather_method": WEATHER_METHOD, **{c: raw.get(c) for c in RAW_WEATHER_COLS},
             }
             # Data-quality gate: only clean rows are returned for appending.
             issue = _row_quality_issue(row)
@@ -603,7 +619,7 @@ def ingest():
                     "cross_source_detail": cross_dropped[:20],
                     "fetch_failed": len(fetch_failed), "fetch_failed_detail": fetch_failed[:20],
                     "quality_ok": quality_ok, "truncated": truncated,
-                    "columns": ROW_COLS, "rows": rows}), 200
+                    "columns": WEATHERAPP_COLS, "rows": rows}), 200
 
 
 # Who gets notified when the weekly auto-promote ships a new model.

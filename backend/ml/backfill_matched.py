@@ -86,7 +86,7 @@ def fill(args):
             for r in csv.DictReader(f):
                 done.add(r["week"])
     new_file = not os.path.exists(args.out)
-    cols = ["week"] + mi.ROW_COLS + ["sensor", "pixel_m", "n_weather_sources"] + mi.RAW_WEATHER_COLS
+    cols = ["week"] + mi.WEATHERAPP_COLS
     if not new_file:  # files started before n_weather_sources existed keep their header
         with open(args.out, newline="") as f:
             cols = next(csv.reader(f))
@@ -145,7 +145,7 @@ def fill(args):
                     for row in rows:
                         w.writerow({"week": wk, **{c: row.get(c) for c in mi.ROW_COLS},
                                     "sensor": "MODIS" if modis else "VIIRS", "pixel_m": 1000 if modis else 375,
-                                    "n_weather_sources": row["n_weather_sources"],
+                                    "n_weather_sources": row["n_weather_sources"], "weather_method": mi.WEATHER_METHOD,
                                     **{c: row.get(c) for c in mi.RAW_WEATHER_COLS}})
                     pairs += 1
             f.flush()
@@ -189,7 +189,8 @@ def regrade(args):
     app = _app()
     with open(args.inp, newline="") as f:
         rows = list(csv.DictReader(f))
-        cols = list(rows[0].keys()) + [c for c in ["n_weather_sources"] + mi.RAW_WEATHER_COLS if c not in rows[0]]
+        cols = list(rows[0].keys()) + [c for c in ["n_weather_sources", "weather_method"] + mi.RAW_WEATHER_COLS
+                                       if c not in rows[0]]
     kept, dropped = [], []
     with app.app_context():
         for i, r in enumerate(rows):
@@ -199,7 +200,8 @@ def regrade(args):
                 feats, n = mi._features_for_historical(float(r["lat"]), float(r["lon"]), r["acq_date"], raw=raw,
                                                        elevation=float(r["elevation"]))
                 r = {**r, "air_temp_encoded": feats["air_temp_encoded"], "wind": feats["wind"], "humidity": feats["humidity"],
-                     "n_weather_sources": n, **{c: raw.get(c) for c in mi.RAW_WEATHER_COLS}}
+                     "n_weather_sources": n, "weather_method": mi.WEATHER_METHOD,
+                     **{c: raw.get(c) for c in mi.RAW_WEATHER_COLS}}
                 kept.append(r)
             except RateLimited:
                 raise SystemExit(f"STOPPED at row {i}: a weather source is rate-limiting us. Rerun regrade.")
@@ -219,6 +221,101 @@ def regrade(args):
         print("  dropped", r["lat"], r["lon"], r["acq_date"], why)
 
 
+def _key(r):
+    return (round(float(r["lat"]), 4), round(float(r["lon"]), 4), r["acq_date"], str(r["fire"]))
+
+
+def raw_readings(args):
+    """Add each source's raw reading to rows that predate the raw columns, without
+    touching anything stored (additive). Resumable: appends to --out, keyed by
+    (lat, lon, acq_date, fire). Also re-blends from the raw readings and reports
+    rows whose stored blend can't be reproduced, which would mean the stored row
+    was made some other way."""
+    from routes import ml_ingest as mi
+    with open(args.inp, newline="") as f:
+        rows = list(csv.DictReader(f))
+    done = set()
+    if os.path.exists(args.out):
+        with open(args.out, newline="") as f:
+            done = {_key(r) for r in csv.DictReader(f)}
+    cols = ["lat", "lon", "acq_date", "fire", "raw_n_sources", "reblend_ok"] + mi.RAW_WEATHER_COLS
+    new_file = not os.path.exists(args.out)
+    out = open(args.out, "a", newline="")
+    w = csv.DictWriter(out, fieldnames=cols)
+    if new_file:
+        w.writeheader()
+    off = 0
+    for i, r in enumerate(rows):
+        if _key(r) in done:
+            continue
+        try:
+            src = mi._weather_sources(float(r["lat"]), float(r["lon"]), r["acq_date"])
+        except RateLimited:
+            raise SystemExit(f"STOPPED at row {i}: a weather source is rate-limiting us. Rerun to resume.")
+        ok = ""
+        if len(src) >= 2:
+            try:
+                b, _ = mi._blend_weather(src)
+                ok = int(abs(b["humidity"] - float(r["humidity"])) < 0.5 and abs(b["wind_speed"] - float(r["wind"])) < 0.2
+                         and abs(b["temperature_celsius"] + 273.15 - float(r["air_temp_encoded"]) * 0.02) < 0.2)
+            except mi.CrossSourceMismatch:
+                ok = 0
+        off += ok == 0
+        w.writerow({"lat": r["lat"], "lon": r["lon"], "acq_date": r["acq_date"], "fire": r["fire"],
+                    "raw_n_sources": len(src), "reblend_ok": ok,
+                    **{f"{n}_{k}": x for n, v in src.items() for k, x in v.items()}})
+        if i % 50 == 0:
+            out.flush()
+            print(f"{i}/{len(rows)} not-reproduced={off}", flush=True)
+    out.close()
+    print(f"done: {args.inp} -> {args.out}; blend not reproduced on {off} new rows")
+
+
+def merge(args):
+    """Build the Weather App Plan training file from row files (highest priority
+    first: a later file never replaces a row an earlier one has), filling raw
+    readings from --raw files where a row lacks them. Adds provenance (sensor,
+    pixel_m, weather_method) where missing and refuses to write a row without
+    >=2 weather sources. Never drops a row except an exact duplicate."""
+    from routes import ml_ingest as mi
+    raw = {}
+    for p in args.raw or []:
+        with open(p, newline="") as f:
+            for r in csv.DictReader(f):
+                if r["reblend_ok"] == "1":  # only readings that reproduce the stored blend
+                    raw[_key(r)] = {c: r[c] for c in mi.RAW_WEATHER_COLS}
+    rows, seen = [], set()
+    for p in args.inp:
+        with open(p, newline="") as f:
+            for r in csv.DictReader(f):
+                k = _key(r)
+                if k in seen:
+                    continue
+                seen.add(k)
+                if not any(r.get(c) for c in mi.RAW_WEATHER_COLS) and k in raw:
+                    r.update(raw[k])
+                rows.append(r)
+    # sensor of a control = its fire's (same point); a row without its partner (the
+    # original dataset has some) is kept, additive, with the sensor of its date
+    sensor = {(r["lat"], r["lon"]): ("MODIS" if r["source"] == "firms_modis" else "VIIRS")
+              for r in rows if r["fire"] == "1"}
+    for r in rows:
+        r["sensor"] = (r.get("sensor") or sensor.get((r["lat"], r["lon"]))
+                       or ("MODIS" if r["acq_date"] < "2012-01-20" else "VIIRS"))
+        r["pixel_m"] = r.get("pixel_m") or (1000 if r["sensor"] == "MODIS" else 375)
+        r["weather_method"] = r.get("weather_method") or mi.WEATHER_METHOD  # inputs all built under v0 weights
+        if int(r["n_weather_sources"]) < 2:
+            raise SystemExit(f"refusing {_key(r)}: {r['n_weather_sources']} weather source(s)")
+    rows.sort(key=lambda r: (r["acq_date"], r["lat"], r["lon"], r["fire"]))
+    with open(args.out, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=mi.WEATHERAPP_COLS, extrasaction="ignore")
+        w.writeheader()
+        w.writerows(rows)
+    no_raw = sum(not any(r.get(c) for c in mi.RAW_WEATHER_COLS) for r in rows)
+    print(f"merged {len(rows)} rows, "
+          f"{no_raw} still without raw readings -> {args.out}")
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -234,5 +331,12 @@ if __name__ == "__main__":
     c.add_argument("--start", required=True)
     c.add_argument("--end", required=True)
     c.add_argument("--out", required=True)
+    d = sub.add_parser("raw")
+    d.add_argument("--inp", required=True)
+    d.add_argument("--out", required=True)
+    e = sub.add_parser("merge")
+    e.add_argument("--inp", nargs="+", required=True)
+    e.add_argument("--raw", nargs="*")
+    e.add_argument("--out", required=True)
     args = ap.parse_args()
-    {"fill": fill, "regrade": regrade, "static-mask": static_mask}[args.cmd](args)
+    {"fill": fill, "regrade": regrade, "static-mask": static_mask, "raw": raw_readings, "merge": merge}[args.cmd](args)
