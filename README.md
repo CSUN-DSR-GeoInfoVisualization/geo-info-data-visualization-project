@@ -78,11 +78,11 @@ inverted, KBDI saturating).
 
 | Feature | Source |
 |---|---|
-| `evi` | MODIS MOD13Q1 Enhanced Vegetation Index (Google Earth Engine, USGS-backed IDW fallback) |
+| `evi` | MODIS MOD13Q1 Enhanced Vegetation Index (Google Earth Engine; NASA ORNL DAAC backup) |
 | `air_temp_encoded` | `(°C + 273.15) / 0.02` — displayed as °F in the UI |
-| `wind` | Wind speed (m/s, Open-Meteo) |
-| `humidity` | Relative humidity (%) |
-| `elevation` | USGS 3DEP |
+| `wind` | Wind speed (m/s). Training: NOAA RTMA → ERA5 → MERRA-2 · live: Open-Meteo |
+| `humidity` | Relative humidity (%). Training: RTMA + ERA5 + MERRA-2, skill-weighted · live: Open-Meteo |
+| `elevation` | USGS 3DEP (Open-Elevation backup) |
 | `kbdi` | Keetch-Byram Drought Index — 30-day cumulative soil-moisture deficit |
 
 The model **loads once at startup** and is kept current by a **GitHub-Actions pipeline** with no
@@ -117,12 +117,18 @@ Details in [`backend/ml/README.md`](backend/ml/README.md) and [docs/ARCHITECTURE
 
 ## Data sources
 
-- **Satellite** — NASA FIRMS (VIIRS NOAA-20; the S-NPP feed went dark Nov 2026), MODIS MOD13Q1 EVI
-  via Google Earth Engine with NASA ORNL DAAC as backup
+- **Satellite** — NASA FIRMS (VIIRS NOAA-20 live; the S-NPP feed went dark Nov 2026). Training labels
+  from the FIRMS standard-processing archive: MODIS for 2001–2011, VIIRS S-NPP / NOAA-20 from 2012.
+  MODIS MOD13Q1 EVI via Google Earth Engine with NASA ORNL DAAC as backup
 - **Weather (training)** — NOAA RTMA via Earth Engine, Open-Meteo archive (ERA5) and NASA POWER
   (MERRA-2), skill-weighted per feature;
   drought (KBDI) from NASA POWER with Open-Meteo as backup
-- **Fire agencies** — CAL FIRE Incidents & Historic Perimeters, NIFC WFIGS, CAL FIRE DINS damage
+- **Weather stations (skill scoring)** — Iowa Environmental Mesonet ASOS/AWOS (161 California airport
+  stations, 2001 → present, quality-controlled) and NOAA USCRN (7 reference sites): the ground truth
+  each weather source is scored against
+- **Terrain** — USGS 3DEP elevation, Open-Elevation backup
+- **Fire agencies** — CAL FIRE Incidents & Historic Perimeters, NIFC WFIGS, NIFC InterAgency Fire
+  Perimeter History (2,475 fires CAL FIRE lacks), CAL FIRE DINS damage
   (77,500+ fire-damaged structures, 2013→present; archived in `backend/data/dins/`)
 - **Emergency management** — Cal OES `CA_EVACUATIONS_PROD` (Genasys PROTECT + county feeds),
   CalOES shelter mirror (8,014 facilities)
