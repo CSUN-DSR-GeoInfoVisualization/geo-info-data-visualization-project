@@ -247,19 +247,32 @@ backend/
 │   └── fire_news/          # GNews + CAL FIRE incidents adapters
 ├── ml/
 │   ├── inference.py        # predict_from_features() — model loading and scoring
-│   ├── build_dataset.py    # Training-data pipeline (FIRMS + AppEEARS + Open-Meteo)
 │   ├── train_monotonic.py  # Monotonic HGB + isotonic calibration + physics gate (current model)
-│   ├── retrain_and_gate.py # Gated retrain/promote on the rolling dataset
+│   ├── retrain_and_gate.py # Gated retrain/promote; refuses rows not built by the skill-weighted blend
+│   ├── backfill_matched.py # 2001 → present backfill: fill, regrade, raw/event readings, merge, labels
+│   ├── weather_skill.py    # Weekly skill check of each weather source vs ASOS + USCRN stations
+│   ├── station_truth.py    # QC'd daily truth from every CA ASOS/AWOS station (Iowa Environmental Mesonet)
+│   ├── event_skill.py      # Skill weights for the event-day inputs (gust, offshore, min RH, VPD, rain)
+│   ├── train_ab.py         # Models A (fire start) and B (fire growth) evaluation (in development)
+│   ├── enrich_kbdi.py      # KBDI spin-up from NASA POWER
+│   ├── build_dataset.py    # Original 2020 training-data pipeline (legacy)
 │   ├── retrain.py          # Training + evaluation (legacy)
+│   ├── training_data/      # In-repo datasets (weather_app_plan/california_weatherapp.csv is the live set)
 │   └── models/
 │       ├── wildfire_model_predictive.pkl
 │       ├── wildfire_scaler_predictive.pkl
 │       └── model_metadata.json
 ├── data/
 │   ├── sample_locations.py # Fallback CA locations with pre-extracted features
-│   ├── live_weather.py     # Open-Meteo wind / temperature / humidity adapter
-│   ├── live_elevation.py   # Open-Elevation adapter
-│   ├── live_evi.py         # NASA AppEEARS EVI adapter (cached spring composite)
+│   ├── live_weather.py     # Open-Meteo wind / temperature / humidity adapter (live map)
+│   ├── open_meteo.py       # Open-Meteo historical (ERA5) client; raises on rate limits
+│   ├── nasa_power.py       # NASA POWER (MERRA-2) daily client, paced, single-flight
+│   ├── live_kbdi.py        # Keetch-Byram Drought Index (NASA POWER, Open-Meteo backup)
+│   ├── live_elevation.py   # USGS 3DEP elevation, Open-Elevation backup
+│   ├── live_evi_gee.py     # MODIS MOD13Q1 EVI via Google Earth Engine (+ NOAA RTMA access)
+│   ├── live_evi.py         # NASA ORNL DAAC EVI (same product, backup)
+│   ├── fire_history_archive.py # NIFC InterAgency perimeter supplement to CAL FIRE FRAP
+│   ├── dins_archive.py     # CAL FIRE DINS structure-damage archive (2013 → present)
 │   ├── fire_news_feeds.py  # CAL FIRE Incidents API adapter
 │   └── boundaries/         # Cached TIGER/Line GeoJSON for counties / ZIP / tracts / neighborhoods
 ├── migrations/             # Alembic migrations (Flask-Migrate)
