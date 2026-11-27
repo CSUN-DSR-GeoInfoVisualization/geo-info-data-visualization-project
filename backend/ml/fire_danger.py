@@ -71,6 +71,12 @@ def danger_sources(lat, lon, date_str):
     except Exception as e:  # logged (reaches the failure digest); the ERA5 source still answers
         logger.warning("gridMET fire-danger failed @ %.3f,%.3f %s: %s", lat, lon, date_str, e)
     out.update(era5_fuel(lat, lon, date_str))  # RateLimited propagates
+    for name, fn in (("normals", lambda: normals_at(int(date_str[5:7]), [("p", lat, lon)])),
+                     ("soil", lambda: soil_at(date_str, [("p", lat, lon)]))):
+        try:
+            out.update(fn().get("p", {}))
+        except Exception as e:  # logged to the failure digest; other columns still land
+            logger.warning("%s failed @ %.3f,%.3f %s: %s", name, lat, lon, date_str, e)
     return {k: v for k, v in out.items() if v is not None}
 
 
