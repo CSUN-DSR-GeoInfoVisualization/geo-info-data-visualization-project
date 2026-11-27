@@ -686,6 +686,78 @@ def batch_columns(args):
     print(f"done {n} rows -> {args.out}")
 
 
+NLCD_YEARS = (2001, 2004, 2006, 2008, 2011, 2013, 2016, 2019, 2021)
+NLCD_AG = {"81", "82"}  # pasture/hay, cultivated crops
+
+
+def label_class(args):
+    """Additive label columns for fire rows (Ido 2026-11-26: models train on confirmed
+    wildfires). wildfire_confirmed = inside a mapped perimeter (fire_id, from
+    label-size) or matched to the USFS FPA FOD ignition record (<= 0.03 deg, detected
+    between discovery - 1 day and containment + 1 day); likely_burn_or_ag = on NLCD
+    pasture/cropland with no wildfire match; else unknown. Also fpa_cause,
+    fpa_size_acres, nlcd_class. Controls get no label."""
+    import sqlite3
+    import numpy as np
+    import pandas as pd
+    from ml import fire_danger as fd
+    d = pd.read_csv(args.inp, dtype=str, keep_default_na=False)
+    q = pd.read_sql("select DISCOVERY_DATE, CONT_DATE, LATITUDE, LONGITUDE, FIRE_SIZE, NWCG_GENERAL_CAUSE "
+                    "from Fires where STATE='CA' and FIRE_YEAR >= 2000", sqlite3.connect(args.fpa))
+    jd = lambda x: pd.to_datetime(x - 2440587.5, unit="D")
+    disc = jd(q.DISCOVERY_DATE)
+    cont = jd(q.CONT_DATE).fillna(disc + pd.Timedelta(days=3))
+    cont = cont.where(cont >= disc, disc).clip(upper=disc + pd.Timedelta(days=120))
+    lat, lon = q.LATITUDE.values, q.LONGITUDE.values
+    lo_t, hi_t = (disc - pd.Timedelta(days=1)).values, (cont + pd.Timedelta(days=1)).values
+    cell = {}
+    for i, (a, b) in enumerate(zip((lat / 0.05).astype(int), (lon / 0.05).astype(int))):
+        cell.setdefault((a, b), []).append(i)
+    fires = d.index[d["fire"] == "1"]
+    for c in ("label_class", "fpa_cause", "fpa_size_acres", "nlcd_class"):
+        if c not in d:
+            d[c] = ""
+    matched = {}
+    for i in fires:
+        la, lo, t = float(d.at[i, "lat"]), float(d.at[i, "lon"]), np.datetime64(d.at[i, "acq_date"])
+        best = None
+        for da in (-1, 0, 1):
+            for db in (-1, 0, 1):
+                for j in cell.get((int(la / 0.05) + da, int(lo / 0.05) + db), []):
+                    if abs(lat[j] - la) < 0.03 and abs(lon[j] - lo) < 0.03 and lo_t[j] <= t <= hi_t[j]:
+                        if best is None or q.FIRE_SIZE[j] > q.FIRE_SIZE[best]:
+                            best = j
+        if best is not None:
+            matched[i] = best
+            d.at[i, "fpa_cause"] = q.NWCG_GENERAL_CAUSE[best]
+            d.at[i, "fpa_size_acres"] = str(q.FIRE_SIZE[best])
+    by_ver = {}
+    for i in fires:
+        y = int(d.at[i, "acq_date"][:4])
+        by_ver.setdefault(max([v for v in NLCD_YEARS if v <= y] or [NLCD_YEARS[0]]), []).append(i)
+    ee = fd._ee()
+    for ver, idx in by_ver.items():
+        img = (ee.Image("USGS/NLCD_RELEASES/2021_REL/NLCD/2021") if ver == 2021 else
+               ee.ImageCollection("USGS/NLCD_RELEASES/2019_REL/NLCD").filter(ee.Filter.eq("system:index", str(ver))).first()
+               ).select("landcover")
+        for c0 in range(0, len(idx), 500):
+            chunk = idx[c0:c0 + 500]
+            res = fd._reduce(img, [(i, float(d.at[i, "lat"]), float(d.at[i, "lon"])) for i in chunk], 30)
+            for i in chunk:
+                v = res.get(str(i), {}).get("landcover")
+                d.at[i, "nlcd_class"] = "" if v is None else str(int(v))
+        print(f"NLCD {ver}: {len(idx)} fire rows", flush=True)
+    for i in fires:
+        confirmed = bool(d.at[i, "fire_id"]) or i in matched
+        d.at[i, "label_class"] = ("wildfire_confirmed" if confirmed else
+                                  "likely_burn_or_ag" if d.at[i, "nlcd_class"] in NLCD_AG else "unknown")
+    d.to_csv(args.out, index=False)
+    f = d.loc[fires]
+    print(f"{len(f)} fire rows: " + ", ".join(f"{k} {v:.0%}" for k, v in f.label_class.value_counts(normalize=True).items()))
+    print("confirmed by month:", (f[f.label_class == "wildfire_confirmed"].acq_date.str[5:7].value_counts(normalize=True)
+                                  .sort_index() * 100).round().astype(int).to_dict())
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -732,5 +804,9 @@ if __name__ == "__main__":
     r_.add_argument("--kind", choices=["normals", "soil"], required=True)
     r_.add_argument("--inp", required=True)
     r_.add_argument("--out", required=True)
+    lc = sub.add_parser("label-class")
+    lc.add_argument("--inp", required=True)
+    lc.add_argument("--out", required=True)
+    lc.add_argument("--fpa", required=True)
     args = ap.parse_args()
-    {"batch": batch_columns, "fire-danger": fire_danger, "growth-set": growth_set, "spatial": spatial, "label-size": label_size, "fill": fill, "regrade": regrade, "static-mask": static_mask, "raw": raw_readings, "merge": merge}[args.cmd](args)
+    {"label-class": label_class, "batch": batch_columns, "fire-danger": fire_danger, "growth-set": growth_set, "spatial": spatial, "label-size": label_size, "fill": fill, "regrade": regrade, "static-mask": static_mask, "raw": raw_readings, "merge": merge}[args.cmd](args)
