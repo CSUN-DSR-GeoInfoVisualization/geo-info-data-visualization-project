@@ -1,4 +1,5 @@
-"""Elevation lookups: USGS 3DEP primary, Open-Elevation fallback, DB tile cache.
+"""Elevation lookups: USGS 3DEP primary, the same 3DEP data via Earth Engine second,
+Open-Elevation last, DB tile cache.
 
 Tile granularity: 0.01° (~1.1 km at California latitudes). Elevation is static
 geographically, so cache entries never expire.
@@ -37,6 +38,22 @@ def _fetch_usgs(lat: float, lon: float) -> float | None:
         return None
 
 
+def _fetch_ee_3dep(lat: float, lon: float) -> float | None:
+    """The same USGS 3DEP 10 m data through Earth Engine. Added 2026-11-26: the USGS
+    point service slowed past its timeout while Open-Elevation rate-limited us, and
+    both failing dropped backfill rows."""
+    try:
+        from data.live_evi_gee import _ensure_ee_initialized
+        _ensure_ee_initialized()
+        import ee
+        v = (ee.ImageCollection("USGS/3DEP/10m_collection").mosaic()
+             .reduceRegion(ee.Reducer.first(), ee.Geometry.Point(lon, lat), 10).getInfo() or {}).get("elevation")
+        return float(v) if v is not None else None
+    except Exception as e:
+        logger.debug("EE 3DEP miss at %s,%s: %s", lat, lon, e)
+        return None
+
+
 def _fetch_open_elevation(lat: float, lon: float) -> float | None:
     for attempt in range(3):
         try:
@@ -54,8 +71,8 @@ def _fetch_open_elevation(lat: float, lon: float) -> float | None:
 def get_elevation(lat: float, lon: float) -> float:
     """Return elevation (meters) at (lat, lon).
 
-    Order: DB tile cache → USGS 3DEP → Open-Elevation. Result is cached for
-    future calls. Raises only if both upstreams fail and cache is empty.
+    Order: DB tile cache → USGS 3DEP → 3DEP via Earth Engine → Open-Elevation.
+    Result is cached for future calls. Raises only if all fail and cache is empty.
     """
     from models import db, FeatureCacheElevation
 
@@ -67,10 +84,12 @@ def get_elevation(lat: float, lon: float) -> float:
     elev = _fetch_usgs(lat, lon)
     source = "usgs_3dep"
     if elev is None:
+        elev, source = _fetch_ee_3dep(lat, lon), "usgs_3dep_ee"
+    if elev is None:
         elev = _fetch_open_elevation(lat, lon)
         source = "open_elevation"
     if elev is None:
-        raise RuntimeError(f"Both USGS and Open-Elevation failed at {lat},{lon}")
+        raise RuntimeError(f"USGS, Earth Engine 3DEP and Open-Elevation all failed at {lat},{lon}")
 
     try:
         db.session.merge(FeatureCacheElevation(
