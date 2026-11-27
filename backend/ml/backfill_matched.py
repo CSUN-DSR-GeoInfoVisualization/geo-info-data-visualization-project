@@ -613,6 +613,47 @@ def fire_danger(args):
     print(f"done {stats} -> {args.out}")
 
 
+def batch_columns(args):
+    """Additive Earth Engine columns for existing rows, batched (one call per group for all
+    its points): --kind normals (by calendar month) or soil (by date). Resumable."""
+    from ml import fire_danger as fd
+    fn, cols, group = {"normals": (lambda g, pts: fd.normals_at(int(g), pts), fd.NORMAL_COLS, lambda r: r["acq_date"][5:7]),
+                       "soil": (fd.soil_at, fd.SOIL_COLS, lambda r: r["acq_date"])}[args.kind]
+    with open(args.inp, newline="") as f:
+        rows = list(csv.DictReader(f))
+    done = set()
+    if os.path.exists(args.out):
+        with open(args.out, newline="") as f:
+            done = {_key(r) for r in csv.DictReader(f)}
+    groups = {}
+    for r in rows:
+        if _key(r) not in done:
+            groups.setdefault(group(r), []).append(r)
+    new_file = not os.path.exists(args.out)
+    out = open(args.out, "a", newline="")
+    w = csv.DictWriter(out, fieldnames=["lat", "lon", "acq_date", "fire"] + cols, extrasaction="ignore")
+    if new_file:
+        w.writeheader()
+    n = 0
+    for k, g in enumerate(sorted(groups)):
+        grp = groups[g]
+        for c0 in range(0, len(grp), 500):  # Earth Engine payload limit
+            chunk = grp[c0:c0 + 500]
+            try:
+                res = fn(g, [(j, float(r["lat"]), float(r["lon"])) for j, r in enumerate(chunk)])
+            except Exception as e:
+                print(f"{g} failed: {e}"[:200], file=sys.stderr, flush=True)
+                continue
+            for j, r in enumerate(chunk):
+                w.writerow({"lat": r["lat"], "lon": r["lon"], "acq_date": r["acq_date"], "fire": r["fire"], **res.get(str(j), {})})
+                n += 1
+        if k % 25 == 0:
+            out.flush()
+            print(f"{k}/{len(groups)} groups, {n} rows", flush=True)
+    out.close()
+    print(f"done {n} rows -> {args.out}")
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -654,5 +695,9 @@ if __name__ == "__main__":
     q.add_argument("--inp", required=True)
     q.add_argument("--out", required=True)
     q.add_argument("--part", default="0/1")
+    r_ = sub.add_parser("batch")
+    r_.add_argument("--kind", choices=["normals", "soil"], required=True)
+    r_.add_argument("--inp", required=True)
+    r_.add_argument("--out", required=True)
     args = ap.parse_args()
-    {"fire-danger": fire_danger, "growth-set": growth_set, "spatial": spatial, "label-size": label_size, "fill": fill, "regrade": regrade, "static-mask": static_mask, "raw": raw_readings, "merge": merge}[args.cmd](args)
+    {"batch": batch_columns, "fire-danger": fire_danger, "growth-set": growth_set, "spatial": spatial, "label-size": label_size, "fill": fill, "regrade": regrade, "static-mask": static_mask, "raw": raw_readings, "merge": merge}[args.cmd](args)
