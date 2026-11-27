@@ -98,3 +98,15 @@ def test_tier_gate():
     assert tier_failures(spread) == []
     squeezed = tier_report(np.full(100, 0.47), y)          # everything "High"
     assert any("in High" in r for r in tier_failures(squeezed))
+
+
+def test_open_append_upgrades_an_old_header(tmp_path):
+    p = tmp_path / "x.csv"
+    p.write_text("a,b\n1,2\n")
+    f, w = bm._open_append(str(p), ["a", "b", "c"])
+    w.writerow({"a": 3, "b": 4, "c": 5})
+    f.close()
+    d = pd.read_csv(p)
+    assert list(d.columns) == ["a", "b", "c"]
+    assert d.loc[0, "a"] == 1 and pd.isna(d.loc[0, "c"])        # old row kept, by name
+    assert d.loc[1].tolist() == [3, 4, 5]                        # new row aligned
