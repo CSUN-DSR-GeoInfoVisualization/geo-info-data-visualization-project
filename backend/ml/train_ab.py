@@ -89,6 +89,30 @@ def input_effects(d, label, cols, cst):
     return {"effects": out, "weak (< %s)" % MIN_INPUT_EFFECT: [c for c, e in out.items() if e < MIN_INPUT_EFFECT]}
 
 
+def _gate_report(d, p, label, cols):
+    """ml.gates on out-of-fold predictions: calibration, regional floor, leakage,
+    dead inputs, and beating the reference systems present in the data."""
+    from ml import gates
+    y = d[label].values
+    refs = {n: sgn * pd.to_numeric(d[c], errors="coerce").values
+            for n, c, sgn in (("USFS ERC", "bench_erc", 1), ("USFS Burning Index", "bench_bi", 1),
+                              ("100h fuel moisture", "gridmet_fm100", -1), ("1000h fuel moisture", "gridmet_fm1000", -1))
+            if c in d}
+    ref_auroc = {}
+    for n, sc in refs.items():
+        ok = ~np.isnan(sc)
+        if ok.sum() > 200 and len(np.unique(y[ok])) == 2:
+            ref_auroc[n] = round(roc_auc_score(y[ok], sc[ok]), 3)
+    return {"references_auroc": ref_auroc,
+            "failures": (gates.calibration_failures(p.values, y)
+                         + gates.region_failures(p.values, y, d["lat"].values, d["elevation"].values)
+                         + gates.leakage_failures(cols)
+                         + gates.missing_failures(d, [c for c in cols if c != "gust_event"])
+                         + gates.missing_failures(d, [c for c in cols if c == "gust_event"], {"gust_event": GUST_PAIRS_FROM})
+                         + (gates.beats_reference_failures(p.values, y, refs) if refs else
+                            ["reference comparison: no benchmark columns in this data"]))}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--weights")
@@ -104,7 +128,8 @@ def main():
     for name, cols, cst in (("A base 6", FEATURE_COLS, CST[:6]), ("A + events", COLS, CST)):
         out[name] = {}
         for split, grp in (("held-out years", pair_year // 5), ("held-out places", place)):
-            out[name][split] = _metrics(d["fire"], _cv(d, "fire", grp, cols, cst))
+            ps = _cv(d, "fire", grp, cols, cst)
+            out[name][split] = {**_metrics(d["fire"], ps), "gates": _gate_report(d, ps, "fire", cols)}
         sp = d[d["control_type"].isin(["", "spatial"]) | d["fire"].eq(1)]
         tp = d[d["control_type"].isin(["same_place", "same_season"]) | d["fire"].eq(1)]
         p = _cv(d, "fire", pair_year // 5, cols, cst)

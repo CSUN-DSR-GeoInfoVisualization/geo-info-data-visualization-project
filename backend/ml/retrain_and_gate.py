@@ -300,9 +300,17 @@ def evaluate(now_iso):
     cand_m = _metrics(cand, cand_scaler, Xte, yte)
     # The five tiers must be used, judged on all rows (the holdout is one season).
     tiers = tier_report(cand.predict_proba(cand_scaler.transform(X))[:, 1], y)
-    if tier_failures(tiers):
+    # Gates review 2026-11-26 (ml.gates): calibrated, no region at chance, no dead
+    # input, no benchmark/label column as an input.
+    from ml import gates
+    p_te = cand.predict_proba(cand_scaler.transform(Xte))[:, 1]
+    extra = ([f"tiers: {r}" for r in tier_failures(tiers)]
+             + gates.calibration_failures(p_te, yte)
+             + gates.region_failures(p_te, yte, te["lat"].values, te["elevation"].values)
+             + gates.missing_failures(df, FEATURE_COLS) + gates.leakage_failures(FEATURE_COLS))
+    if extra:
         cand_phys_ok = False
-        bad = bad + [f"tiers: {r}" for r in tier_failures(tiers)]
+        bad = bad + extra
     pm, ps = joblib.load(_MODEL_OUT), joblib.load(_SCALER_OUT)
     prod_m = _metrics(pm, ps, Xte, yte)
     prod_phys_ok = gate_passes(validate_monotonicity(pm, ps, X_ref=tr[FEATURE_COLS].values), MIN_INPUT_EFFECT)
