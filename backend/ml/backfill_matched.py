@@ -501,6 +501,12 @@ def growth_set(args):
     if os.path.exists(args.out):
         with open(args.out, newline="") as f:
             done = {r["fire_id"] for r in csv.DictReader(f)}
+    # fires FIRMS has no detection for: remembered, so a restart doesn't re-ask FIRMS about them
+    skip_path = args.out + ".no_detection"
+    if os.path.exists(skip_path):
+        with open(skip_path) as f:
+            done |= {line.rstrip("\n") for line in f}
+    skip_f = open(skip_path, "a")
     new_file = not os.path.exists(args.out)
     out = open(args.out, "a", newline="")
     w = csv.DictWriter(out, fieldnames=cols, extrasaction="ignore")
@@ -526,7 +532,7 @@ def growth_set(args):
                 try:
                     r = requests.get(url, timeout=90)
                     r.raise_for_status()
-                    time.sleep(3)  # FIRMS allows 5,000 transactions / 10 min per key, shared with the live site
+                    time.sleep(float(os.environ.get("FIRMS_INTERVAL", 3)))  # FIRMS: 5,000 transactions / 10 min per key, shared with the live site
                 except Exception as e:
                     print(f"{fid} FIRMS failed: {str(e).replace(key, '<key>')}"[:300], file=sys.stderr, flush=True)
                     stats["failed"] += 1
@@ -539,6 +545,8 @@ def growth_set(args):
                         hits.append((d["acq_date"], d.get("acq_time", ""), float(d["latitude"]), float(d["longitude"])))
                 if not hits:
                     stats["no_detection"] += 1
+                    skip_f.write(fid + "\n")
+                    skip_f.flush()
                     continue
                 day, _, la, lo = min(hits)
                 try:
@@ -564,6 +572,7 @@ def growth_set(args):
                     out.flush()
                     print(f"{year} {stats}", flush=True)
     out.close()
+    skip_f.close()
     print(f"done {stats} -> {args.out}")
 
 
