@@ -426,9 +426,10 @@ def spatial(args):
     fires = [r for k, r in enumerate(fires) if k % n == i]
     cols = mi.WEATHERAPP_COLS + ["pair_of"]
     done = set()
-    if os.path.exists(args.out):
-        with open(args.out, newline="") as f:
-            done = {r["pair_of"] for r in csv.DictReader(f)}
+    for path in [args.out] + list(getattr(args, "skip_files", None) or []):  # resharding: see every shard's work
+        if os.path.exists(path):
+            with open(path, newline="") as f:
+                done |= {r["pair_of"] for r in csv.DictReader(f)}
     new_file = not os.path.exists(args.out)
     out = open(args.out, "a", newline="")
     w = csv.DictWriter(out, fieldnames=cols, extrasaction="ignore")
@@ -695,6 +696,7 @@ if __name__ == "__main__":
     h.add_argument("--inp", required=True)
     h.add_argument("--out", required=True)
     h.add_argument("--part", default="0/1")
+    h.add_argument("--skip-files", nargs="*")
     j = sub.add_parser("growth-set")
     j.add_argument("--start", type=int, default=2001)
     j.add_argument("--end", type=int, default=dt.date.today().year)
