@@ -225,6 +225,33 @@ def _key(r):
     return (round(float(r["lat"]), 4), round(float(r["lon"]), 4), r["acq_date"], str(r["fire"]))
 
 
+def _open_append(path, cols):
+    """Open a CSV to append rows with `cols`. If the file was started with other
+    columns (the code gained columns since), first rewrite it with `cols`, old rows
+    carried over by name. Appending new rows under an old header misaligned every
+    column (2026-11-26)."""
+    if os.path.exists(path):
+        with open(path, newline="") as f:
+            rd = csv.reader(f)
+            old = next(rd, None)
+            if old is not None and old != cols:
+                rows = [dict(zip(old, r)) for r in rd]
+                if any(len(r) != len(old) for r in rows if r):
+                    raise SystemExit(f"{path}: rows do not match its header; repair before appending")
+                with open(path + ".tmp", "w", newline="") as g:
+                    w = csv.DictWriter(g, fieldnames=cols, extrasaction="ignore")
+                    w.writeheader()
+                    w.writerows(rows)
+                os.replace(path + ".tmp", path)
+                print(f"{path}: upgraded header {len(old)} -> {len(cols)} columns", file=sys.stderr, flush=True)
+    new_file = not os.path.exists(path) or os.path.getsize(path) == 0
+    f = open(path, "a", newline="")
+    w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
+    if new_file:
+        w.writeheader()
+    return f, w
+
+
 def raw_readings(args):
     """Add each source's raw reading to rows that predate the raw columns, without
     touching anything stored (additive). Resumable: appends to --out, keyed by
@@ -298,14 +325,16 @@ def merge(args):
                 ev = {c: r[c] for c in mi.RAW_EVENT_COLS if r.get(c)}
                 if ev:
                     events.setdefault(k, {}).update(ev)
-    rows, seen = [], set()
+    rows, seen, seen_pair = [], set(), set()
     for p in args.inp:
         with open(p, newline="") as f:
             for r in csv.DictReader(f):
                 k = _key(r)
-                if k in seen:
-                    continue
+                if k in seen or (r.get("pair_of") and r["pair_of"] in seen_pair):
+                    continue  # exact duplicate, or a second random spot for the same fire
                 seen.add(k)
+                if r.get("pair_of"):
+                    seen_pair.add(r["pair_of"])
                 if not any(r.get(c) for c in mi.RAW_WEATHER_COLS) and k in raw:
                     r.update(raw[k])
                 if k in events:
@@ -430,11 +459,7 @@ def spatial(args):
         if os.path.exists(path):
             with open(path, newline="") as f:
                 done |= {r["pair_of"] for r in csv.DictReader(f)}
-    new_file = not os.path.exists(args.out)
-    out = open(args.out, "a", newline="")
-    w = csv.DictWriter(out, fieldnames=cols, extrasaction="ignore")
-    if new_file:
-        w.writeheader()
+    out, w = _open_append(args.out, cols)
     stats = {"written": 0, "failed": 0}
     with app.app_context():
         for k, r in enumerate(fires):
@@ -508,11 +533,7 @@ def growth_set(args):
         with open(skip_path) as f:
             done |= {line.rstrip("\n") for line in f}
     skip_f = open(skip_path, "a")
-    new_file = not os.path.exists(args.out)
-    out = open(args.out, "a", newline="")
-    w = csv.DictWriter(out, fieldnames=cols, extrasaction="ignore")
-    if new_file:
-        w.writeheader()
+    out, w = _open_append(args.out, cols)
     stats = {"written": 0, "no_detection": 0, "failed": 0}
     iso = lambda ms: dt.datetime.fromtimestamp(ms / 1000, dt.timezone.utc).date()
     k = -1
