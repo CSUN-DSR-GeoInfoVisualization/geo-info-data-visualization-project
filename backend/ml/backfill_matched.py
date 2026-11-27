@@ -688,6 +688,9 @@ def batch_columns(args):
 
 NLCD_YEARS = (2001, 2004, 2006, 2008, 2011, 2013, 2016, 2019, 2021)
 NLCD_AG = {"81", "82"}  # pasture/hay, cultivated crops
+# Burnable wildland (A4b): forest 41-43, shrub 51-52, grassland/sedge 71-72, wetlands 90/95.
+# Water, ice, developed, barren and cropland are not (LANDFIRE fuel models come with B2).
+NLCD_WILDLAND = {"41", "42", "43", "51", "52", "71", "72", "90", "95"}
 
 
 def label_class(args):
@@ -714,7 +717,7 @@ def label_class(args):
     for i, (a, b) in enumerate(zip((lat / 0.05).astype(int), (lon / 0.05).astype(int))):
         cell.setdefault((a, b), []).append(i)
     fires = d.index[d["fire"] == "1"]
-    for c in ("label_class", "fpa_cause", "fpa_size_acres", "nlcd_class"):
+    for c in ("label_class", "fpa_cause", "fpa_size_acres", "nlcd_class", "burnable"):
         if c not in d:
             d[c] = ""
     matched = {}
@@ -731,8 +734,9 @@ def label_class(args):
             matched[i] = best
             d.at[i, "fpa_cause"] = q.NWCG_GENERAL_CAUSE[best]
             d.at[i, "fpa_size_acres"] = str(q.FIRE_SIZE[best])
+    spatial_rows = d.index[d["control_type"] == "spatial"] if "control_type" in d else []
     by_ver = {}
-    for i in fires:
+    for i in list(fires) + list(spatial_rows):
         y = int(d.at[i, "acq_date"][:4])
         by_ver.setdefault(max([v for v in NLCD_YEARS if v <= y] or [NLCD_YEARS[0]]), []).append(i)
     ee = fd._ee()
@@ -746,7 +750,9 @@ def label_class(args):
             for i in chunk:
                 v = res.get(str(i), {}).get("landcover")
                 d.at[i, "nlcd_class"] = "" if v is None else str(int(v))
-        print(f"NLCD {ver}: {len(idx)} fire rows", flush=True)
+        print(f"NLCD {ver}: {len(idx)} rows", flush=True)
+    for i in spatial_rows:
+        d.at[i, "burnable"] = "1" if d.at[i, "nlcd_class"] in NLCD_WILDLAND else "0"
     for i in fires:
         confirmed = bool(d.at[i, "fire_id"]) or i in matched
         d.at[i, "label_class"] = ("wildfire_confirmed" if confirmed else
@@ -754,6 +760,8 @@ def label_class(args):
     d.to_csv(args.out, index=False)
     f = d.loc[fires]
     print(f"{len(f)} fire rows: " + ", ".join(f"{k} {v:.0%}" for k, v in f.label_class.value_counts(normalize=True).items()))
+    if len(spatial_rows):
+        print(f"random-spot controls on burnable wildland: {(d.loc[spatial_rows, 'burnable'] == '1').mean():.0%}")
     print("confirmed by month:", (f[f.label_class == "wildfire_confirmed"].acq_date.str[5:7].value_counts(normalize=True)
                                   .sort_index() * 100).round().astype(int).to_dict())
 
