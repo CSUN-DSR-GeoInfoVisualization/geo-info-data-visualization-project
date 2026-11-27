@@ -357,8 +357,8 @@ def _weather_sources(lat, lon, date_str):
 # per-source readings and blended at training time by measured skill.
 EVENT_KEYS = ("gust_event", "offshore_event", "rh_min_event", "vpd_max_event", "rain_7d")
 RAW_EVENT_COLS = [f"{s}_{k}" for s in WEATHER_SOURCES for k in EVENT_KEYS]
-from ml.fire_danger import DANGER_COLS  # noqa: E402  (fire-danger raw columns)
-WEATHERAPP_COLS = WEATHERAPP_COLS + RAW_EVENT_COLS + DANGER_COLS
+from ml.fire_danger import DANGER_COLS, NORMAL_COLS, SOIL_COLS  # noqa: E402  (fire-danger raw columns)
+WEATHERAPP_COLS = WEATHERAPP_COLS + RAW_EVENT_COLS + DANGER_COLS + NORMAL_COLS + SOIL_COLS
 RTMA_GUST_FROM = "2014-02-01"  # RTMA GUST band is empty before this (verified in Earth Engine 2026-11-26)
 OFFSHORE_FROM_DEG = 45.0       # wind FROM the north-east: Santa Ana / Diablo direction
 

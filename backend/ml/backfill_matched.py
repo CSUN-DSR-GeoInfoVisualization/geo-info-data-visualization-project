@@ -281,11 +281,12 @@ def merge(args):
     >=2 weather sources. Never drops a row except an exact duplicate."""
     from routes import ml_ingest as mi
     raw, events = {}, {}
-    from ml.fire_danger import DANGER_COLS, BENCH_COLS
-    for p in getattr(args, "danger", None) or []:  # fire-danger columns: additive, never over a value already there
+    from ml.fire_danger import DANGER_COLS, BENCH_COLS, NORMAL_COLS, SOIL_COLS
+    extra_cols = DANGER_COLS + BENCH_COLS + NORMAL_COLS + SOIL_COLS
+    for p in getattr(args, "danger", None) or []:  # extra-column files (fire-danger, normals, soil): additive
         with open(p, newline="") as f:
             for r in csv.DictReader(f):
-                v = {c: r[c] for c in DANGER_COLS + BENCH_COLS if r.get(c)}
+                v = {c: r[c] for c in extra_cols if r.get(c)}
                 if v:
                     events.setdefault(_key(r), {}).update(v)
     for p in args.raw or []:
