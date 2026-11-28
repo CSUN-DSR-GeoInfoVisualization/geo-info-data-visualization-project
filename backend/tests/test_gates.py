@@ -86,3 +86,10 @@ def test_grouped_calibration_survives_an_input_missing_from_whole_years():
     gust = np.where(years >= 6, x + rng.normal(0, .5, n), np.nan)   # exists only in later years
     m, s = train_monotonic(np.c_[x, gust], y, monotonic_cst=[1, 1], groups=years // 2)
     assert np.isfinite(m.predict_proba(s.transform(np.c_[x, gust]))).all()
+
+
+def test_design_weights_match_the_training_share():
+    y = np.r_[np.ones(30), np.zeros(70)]
+    w = gates.design_weights(y, 0.2)
+    assert abs(np.average(y, weights=w) - 0.2) < 1e-9
+    assert np.allclose(gates.design_weights(y, None), 1)

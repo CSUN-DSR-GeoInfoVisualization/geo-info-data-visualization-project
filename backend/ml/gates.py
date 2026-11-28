@@ -14,18 +14,31 @@ BOOT = 300                # bootstrap draws for "the gain is real, not noise"
 FORBIDDEN_PREFIXES = ("bench_", "rfw", "firms_", "frp", "ta_")   # benchmarks and label-derived data
 
 
-def calibration_failures(p, y, bins=10):
+def design_weights(y, target_share):
+    """Case-control rows reweighted so the positive share equals target_share (the training
+    sample's). Brier/ECE/log loss on a case-control sample depend on its sampling ratio, so a
+    test built with a different ratio must be judged under the training design (2026-11-27)."""
+    y = np.asarray(y)
+    s = y.mean()
+    if target_share is None or s in (0, 1):
+        return np.ones(len(y))
+    return np.where(y == 1, target_share / s, (1 - target_share) / (1 - s))
+
+
+def calibration_failures(p, y, bins=10, w=None):
     """Expected calibration error over probability deciles, plus observed fire rate
     must not fall from one decile to the next."""
     p, y = np.asarray(p, float), np.asarray(y, float)
+    w = np.ones(len(y)) if w is None else np.asarray(w, float)
     edges = np.quantile(p, np.linspace(0, 1, bins + 1))
     idx = np.clip(np.searchsorted(edges, p, side="right") - 1, 0, bins - 1)
     ece, rates = 0.0, []
     for b in range(bins):
         m = idx == b
         if m.any():
-            ece += m.mean() * abs(p[m].mean() - y[m].mean())
-            rates.append(y[m].mean())
+            wm = w[m]
+            ece += wm.sum() / w.sum() * abs(np.average(p[m], weights=wm) - np.average(y[m], weights=wm))
+            rates.append(np.average(y[m], weights=wm))
     out = []
     if ece > MAX_ECE:
         out.append(f"calibration error {ece:.3f} > {MAX_ECE}")
@@ -66,7 +79,7 @@ def _calibrated_reference(score, y, groups, k=5):
     return p
 
 
-def beats_reference_failures(p, y, references, groups=None, seed=0, ref_probs=None):
+def beats_reference_failures(p, y, references, groups=None, seed=0, ref_probs=None, target_share=None):
     """Gate 10 (Ido, 2026-11-27): beat EVERY reference system on AUROC and on Brier,
     each gain above 0 at the bootstrap 5th percentile. references: {name: score,
     higher = riskier}; each is calibrated out of fold before its Brier is compared."""
@@ -74,6 +87,7 @@ def beats_reference_failures(p, y, references, groups=None, seed=0, ref_probs=No
     p, y = np.asarray(p, float), np.asarray(y)
     groups = np.zeros(len(y)) if groups is None else np.asarray(groups)
     out, rng = [], np.random.default_rng(seed)
+    w_all = design_weights(y, target_share)
     if not references:
         return ["reference comparison: no reference systems in this data"]
     for name, sc in references.items():
@@ -82,7 +96,7 @@ def beats_reference_failures(p, y, references, groups=None, seed=0, ref_probs=No
         if ok.sum() < 200 or len(np.unique(y[ok])) < 2:
             out.append(f"{name}: too few rows to compare")
             continue
-        pp, yy, ss = p[ok], y[ok], sc[ok]
+        pp, yy, ss, ww = p[ok], y[ok], sc[ok], w_all[ok]
         # Same treatment as the model: if the caller supplies reference probabilities fitted on
         # the training rows (ref_probs), use them; calibrating on the test rows themselves would
         # tune the reference to the test's own base rate (2026-11-27 fairness fix).
@@ -96,7 +110,7 @@ def beats_reference_failures(p, y, references, groups=None, seed=0, ref_probs=No
                 da.append(roc_auc_score(yy[i], pp[i]) - roc_auc_score(yy[i], ss[i]))
                 j = i[m[i]]
                 if len(np.unique(yy[j])) == 2:
-                    db.append(brier_score_loss(yy[j], cal[j]) - brier_score_loss(yy[j], pp[j]))
+                    db.append(brier_score_loss(yy[j], cal[j], sample_weight=ww[j]) - brier_score_loss(yy[j], pp[j], sample_weight=ww[j]))
         lo_a, lo_b = float(np.percentile(da, 5)), float(np.percentile(db, 5)) if db else -1.0
         if lo_a <= 0:
             out.append(f"does not reliably beat {name} on AUROC (gain 5th pct {lo_a:+.3f})")
@@ -158,16 +172,18 @@ def group_effects(model, scaler, X_ref, cols, cst, n=15):
     return out
 
 
-def _skill(score, y, prob=None):
-    """Standard fire-danger / forecast verification measures for one score."""
+def _skill(score, y, prob=None, w=None):
+    """Standard fire-danger / forecast verification measures for one score (w: design weights
+    for the probability measures)."""
     from sklearn.metrics import average_precision_score, brier_score_loss, log_loss
     score, y = np.asarray(score, float), np.asarray(y)
-    base = y.mean()
+    w = np.ones(len(y)) if w is None else np.asarray(w, float)
+    base = np.average(y, weights=w)
     out = {"AUROC": roc_auc_score(y, score), "PR-AUC": average_precision_score(y, score)}
     if prob is not None:
         prob = np.clip(np.asarray(prob, float), 1e-6, 1 - 1e-6)
-        b = brier_score_loss(y, prob)
-        out.update({"Brier": b, "Brier skill": 1 - b / (base * (1 - base)), "log loss": log_loss(y, prob)})
+        b = brier_score_loss(y, prob, sample_weight=w)
+        out.update({"Brier": b, "Brier skill": 1 - b / (base * (1 - base)), "log loss": log_loss(y, prob, sample_weight=w)})
     for top in (0.20, 0.10, 0.03):  # alarm levels: the riskiest 20% / 10% / 3% of rows
         cut = np.quantile(score, 1 - top)
         alarm = score >= cut
@@ -184,12 +200,13 @@ def _skill(score, y, prob=None):
     return {k: round(float(v), 4) for k, v in out.items()}
 
 
-def scoreboard(p, y, references, groups=None, ref_probs=None):
+def scoreboard(p, y, references, groups=None, ref_probs=None, target_share=None):
     """Every verification measure for the model and each reference system on the same
     rows (references calibrated out of fold for the probability measures)."""
     p, y = np.asarray(p, float), np.asarray(y)
     groups = np.zeros(len(y)) if groups is None else np.asarray(groups)
-    board = {"FireScope": _skill(p, y, p)}
+    w = design_weights(y, target_share)
+    board = {"FireScope": _skill(p, y, p, w)}
     for name, sc in references.items():
         sc = np.asarray(sc, float)
         ok = ~np.isnan(sc) & ~np.isnan(p)
@@ -197,8 +214,8 @@ def scoreboard(p, y, references, groups=None, ref_probs=None):
             cal = (np.asarray(ref_probs[name], float)[ok] if ref_probs and name in ref_probs
                    else _calibrated_reference(sc[ok], y[ok], groups[ok]))
             m = ~np.isnan(cal)
-            board[name] = _skill(sc[ok][m], y[ok][m], cal[m])
-            board[name]["_FireScope_same_rows"] = _skill(p[ok][m], y[ok][m], p[ok][m])
+            board[name] = _skill(sc[ok][m], y[ok][m], cal[m], w[ok][m])
+            board[name]["_FireScope_same_rows"] = _skill(p[ok][m], y[ok][m], p[ok][m], w[ok][m])
     return board
 
 
