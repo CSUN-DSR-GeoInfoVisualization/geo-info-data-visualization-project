@@ -79,7 +79,7 @@ def model_a_rows(d, burnable_only=True):
     """Confirmed wildfires and the controls paired with them."""
     f = d[(d["fire"] == 1) & (d["label_class"] == "wildfire_confirmed")]
     keys = set(f["lat"].round(5).astype(str) + "," + f["lon"].round(5).astype(str))
-    fire_keys = set(f["pair_key"])
+    fire_keys = set(f["pair_key"]) | set(f["pair_of"].dropna()) if "pair_of" in f else set(f["pair_key"])  # FPA groups link by fpa:<id>
     c = d[d["fire"] == 0]
     loc = c["lat"].round(5).astype(str) + "," + c["lon"].round(5).astype(str)
     same = c[c["control_type"].isin(["same_place", "same_season"]) & loc.isin(keys)]
@@ -391,7 +391,9 @@ def main():
         g = None
     if g is not None and len(g):
         g["control_type"] = ""
-        g = build_inputs(g, weights)
+        # Model B also learns from every FPA FOD fire: exact discovery point and date, final size
+        fpa = d[d["source"].eq("fpa_fod")]
+        g = pd.concat([build_inputs(g, weights), fpa], ignore_index=True)
         if a.only != "combined":
             out["Model B (grows >= %d acres)" % LARGE_ACRES] = evaluate_b(g, d)
         out["Combined A x B (large wildfire starts)"] = evaluate_combined(d, g)
