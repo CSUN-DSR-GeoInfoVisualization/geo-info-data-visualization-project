@@ -12,6 +12,7 @@ Each value records its source so gate 11 can verify training/live definitions.
 import datetime as dt
 import math
 
+import numpy as np
 import requests
 
 from ml.fuel_moisture import dead_fuel_moisture
@@ -110,4 +111,77 @@ def forecast_cells(cells, date_str, per_request=20):
             if len(days) >= 60:
                 v["era5_fm100"], v["era5_fm1000"] = dead_fuel_moisture(days, cell[0])
             out[cell] = {k: val for k, val in v.items() if val is not None}
+    return out
+
+
+HIST_FORECAST = "https://historical-forecast-api.open-meteo.com/v1/forecast"
+CORRECTED = ("era5_gust_event", "era5_offshore_event", "era5_rh_min_event", "era5_vpd_max_event", "era5_rain_7d",
+             "era5_fm100", "era5_fm1000")
+
+
+def fit_forecast_correction(n, out, seed=0):
+    """A6a: linear forecast -> ERA5 correction per variable (and per region when it has >= 60
+    pairs), from n random (cell, date) pairs in 2022-2026 where both the archived forecast and
+    ERA5 exist. Same event definitions on both sides."""
+    import json
+    import random
+    from routes import ml_ingest as mi
+    from ml import gates, fire_danger as fd
+    rng = random.Random(seed)
+    cells = sorted({cell_of(*t) for t in land_tiles()})
+    pairs = []
+    for _ in range(n):
+        c = rng.choice(cells)
+        d = dt.date(2022, 3, 1) + dt.timedelta(days=rng.randrange((dt.date.today() - dt.timedelta(days=10) - dt.date(2022, 3, 1)).days))
+        pairs.append((c, str(d)))
+    rows = []
+    global FORECAST
+    live_url, FORECAST = FORECAST, HIST_FORECAST
+    try:
+        for c, d in pairs:
+            try:
+                f = forecast_cells([c], d, per_request=1).get(c, {})
+                e = {f"era5_{k}": v for k, v in mi._era5_event(c[0], c[1], d).items()}
+                e.update(fd.era5_fuel(c[0], c[1], d))
+                rows.append({"cell": c, "date": d, "f": f, "e": e})
+            except Exception:
+                continue
+    finally:
+        FORECAST = live_url
+    elev = {}
+    try:
+        from ml.absolute_risk import _elevations
+        uniq = sorted({r["cell"] for r in rows})
+        elev = dict(zip(uniq, _elevations(uniq)))
+    except Exception:
+        pass
+    corr = {}
+    for k in CORRECTED:
+        xy = [(r["f"][k], r["e"][k], gates.region_of(np.array([r["cell"][0]]), np.array([elev.get(r["cell"], 0.0) or 0.0]))[0])
+              for r in rows if k in r["f"] and k in r["e"]]
+        if len(xy) < 30:
+            continue
+        x, y, reg = np.array([a for a, _, _ in xy]), np.array([b for _, b, _ in xy]), np.array([g for _, _, g in xy])
+        slope, icpt = np.polyfit(x, y, 1)
+        entry = {"all": [round(float(slope), 4), round(float(icpt), 4)], "n": int(len(x)),
+                 "mae_before": round(float(np.mean(np.abs(x - y))), 3),
+                 "mae_after": round(float(np.mean(np.abs(slope * x + icpt - y))), 3)}
+        for g in np.unique(reg):
+            m = reg == g
+            if m.sum() >= 60:
+                s_, i_ = np.polyfit(x[m], y[m], 1)
+                entry[str(g)] = [round(float(s_), 4), round(float(i_), 4)]
+        corr[k] = entry
+    json.dump({"method": "forecast_to_era5_v0", "pairs": len(rows), "corrections": corr}, open(out, "w"), indent=1)
+    print(json.dumps({k: {x: v[x] for x in ("n", "mae_before", "mae_after")} for k, v in corr.items()}, indent=1))
+
+
+def apply_correction(values, region, corr):
+    """values: {era5_* key: forecast value} -> ERA5-equivalent using the fitted file."""
+    out = dict(values)
+    for k, v in values.items():
+        c = corr.get("corrections", {}).get(k)
+        if c is not None:
+            slope, icpt = c.get(region, c["all"])
+            out[k] = slope * v + icpt
     return out
