@@ -92,7 +92,10 @@ class GroupCalibrated:
         for f in range(k):
             tr, te = fold != f, fold == f
             if te.any() and len(np.unique(y[tr])) == 2:
-                oof[te] = clone(base).fit(Xs[tr], y[tr]).decision_function(Xs[te])
+                Xtr = Xs[tr].copy()
+                dead = np.isnan(Xtr).all(axis=0)  # an input absent from this fold's years (e.g. gust before 2014)
+                Xtr[:, dead] = 0.0                  # constant: the fold model cannot split on it
+                oof[te] = clone(base).fit(Xtr, y[tr]).decision_function(Xs[te])
         ok = ~np.isnan(oof)
         cal = LogisticRegression().fit(oof[ok].reshape(-1, 1), y[ok])
         return cls(clone(base).fit(Xs, y), cal)

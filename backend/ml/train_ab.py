@@ -117,7 +117,11 @@ class StackedGroups:
         for f in range(k):
             tr, te = fold != f, fold == f
             if te.any():
-                ms = {g: fit_g(X[tr][:, [self.cols.index(c) for c in m]], y[tr], m) for g, m in self.groups.items()}
+                ms = {}
+                for g, m in self.groups.items():
+                    Xg = X[tr][:, [self.cols.index(c) for c in m]].copy()
+                    Xg[:, np.isnan(Xg).all(axis=0)] = 0.0  # input absent from this fold's years
+                    ms[g] = fit_g(Xg, y[tr], m)
                 oof[te] = self._score(ms, X[te])
         self.models = {g: fit_g(X[:, [self.cols.index(c) for c in m]], y, m) for g, m in self.groups.items()}
         keep = list(range(len(self.groups)))
@@ -165,6 +169,8 @@ def _cv(d, label, group, cols, cst, k=5, stacked=False):
     g = pd.factorize(group)[0] % k
     for f in range(k):
         tr, te = g != f, g == f
+        if not te.any() or d.loc[tr, label].nunique() < 2:
+            continue
         m, s, c = _fit(d[tr], label, cols, cst, stacked)
         p[te] = m.predict_proba(s.transform(d.loc[te, c].values))[:, 1]
     return p
