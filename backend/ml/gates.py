@@ -201,12 +201,12 @@ def _skill(score, y, prob=None, w=None):
         cn = w[~alarm & (y == 0)].sum()
         n = w.sum()
         exp = ((hits + miss) * (hits + fa) + (cn + miss) * (cn + fa)) / n
-        out[f"fire capture top {int(top*100)}%"] = hits / max(hits + miss, 1)          # POD
+        out[f"fire capture top {int(top*100)}%"] = hits / max(hits + miss, 1e-12)  # POD; eps guard: weights can sum below 1
         if top == 0.10:
-            out["FAR top 10%"] = fa / max(hits + fa, 1)
-            out["CSI top 10%"] = hits / max(hits + fa + miss, 1)
-            out["Heidke top 10%"] = (hits + cn - exp) / max(n - exp, 1)
-            out["lift top 10%"] = (hits / max(hits + fa, 1)) / max(base, 1e-9)
+            out["FAR top 10%"] = fa / max(hits + fa, 1e-12)
+            out["CSI top 10%"] = hits / max(hits + fa + miss, 1e-12)
+            out["Heidke top 10%"] = (hits + cn - exp) / max(n - exp, 1e-12)
+            out["lift top 10%"] = (hits / max(hits + fa, 1e-12)) / max(base, 1e-12)
     return {k: round(float(v), 4) for k, v in out.items()}
 
 

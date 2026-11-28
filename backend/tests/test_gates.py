@@ -111,3 +111,14 @@ def test_skill_weights_change_ranking_measures_and_uniform_weights_do_not():
     assert a["AUROC"] == b["AUROC"] and a["fire capture top 10%"] == b["fire capture top 10%"]
     w = np.where((y == 1) & (s < 1), 10.0, 1.0)  # up-weight hard positives
     assert _skill(s, y, w=w)["AUROC"] < a["AUROC"]
+
+
+def test_weighted_capture_is_not_clamped_when_weights_sum_below_one():
+    import numpy as np
+    from ml.gates import _skill
+    rng = np.random.default_rng(0)
+    y = np.r_[np.ones(557), np.zeros(1491)].astype(int)
+    s = np.r_[rng.normal(0.4, 1, 557), rng.normal(0, 1, 1491)]
+    w = np.r_[np.full(557, 1e-5), np.full(1491, 0.3)]
+    cap = _skill(s, y, w=w)["fire capture top 10%"]
+    assert 0.1 < cap < 0.3  # ~ share of positives above the controls' 90th percentile
