@@ -18,6 +18,8 @@ def design_weights(y, target_share):
     """Case-control rows reweighted so the positive share equals target_share (the training
     sample's). Brier/ECE/log loss on a case-control sample depend on its sampling ratio, so a
     test built with a different ratio must be judged under the training design (2026-11-27)."""
+    if isinstance(target_share, np.ndarray):  # explicit per-row design weights (multi-class designs)
+        return target_share
     y = np.asarray(y)
     s = y.mean()
     if target_share is None or s in (0, 1):
