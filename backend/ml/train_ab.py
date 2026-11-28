@@ -363,6 +363,18 @@ def evaluate_combined(d, g):
     for name, part in (("dev (in-sample for A, B trained without locked)", dev), ("LOCKED TEST", test)):
         p = pd.Series(comb.predict_proba(part[cols].values)[:, 1], index=part.index)
         out[name] = _report(part, p, "large_start", cols, ref_train=(dev, "large_start") if part is test else None)
+    # root-cause diagnostic (2026-11-28): which part loses ranking on the large-start target?
+    from sklearn.metrics import roc_auc_score
+    ya = test["large_start"].values
+    pa_t = ma.predict_proba(sa.transform(test[ca].values))[:, 1]
+    pb_t = mb.predict_proba(sb.transform(test[cb].values))[:, 1]
+    sub = test["fire"].values == 1
+    out["parts on LOCKED TEST (AUROC)"] = {
+        "P_A alone": round(roc_auc_score(ya, pa_t), 3), "P_B alone": round(roc_auc_score(ya, pb_t), 3),
+        "P_A x P_B": round(roc_auc_score(ya, pa_t * pb_t), 3),
+        "P_B among fires only": round(roc_auc_score(ya[sub], pb_t[sub]), 3),
+        "P_A fires vs controls": round(roc_auc_score(test["fire"].values, pa_t), 3),
+        "small fires / large / controls": [int((sub & (ya == 0)).sum()), int(ya.sum()), int((~sub).sum())]}
     out["group effects on A x B (gate 5)"] = gates.group_effects(
         comb, _Identity(), dev[cols].sample(min(400, len(dev)), random_state=0).values, cols,
         [CST[COLS.index(c)] for c in cols])
