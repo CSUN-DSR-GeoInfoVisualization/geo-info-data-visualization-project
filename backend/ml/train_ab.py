@@ -162,8 +162,12 @@ def evaluate_a(d, burnable_only=True):
         r["dead inputs"] = gates.missing_failures(dev, [c for c in cols if c not in ERA]) + \
             gates.missing_failures(dev, [c for c in cols if c in ERA], ERA)
         eff = input_effects(dev, "fire", cols, cst)
-        r["input effects"] = eff
-        r["weak inputs (< %s)" % MIN_INPUT_EFFECT] = [c for c, e in eff.items() if e < MIN_INPUT_EFFECT]
+        r["input effects (each alone)"] = eff
+        m_, s_, c_ = _fit(dev, "fire", cols, cst)
+        geff = gates.group_effects(m_, s_, dev[c_].sample(min(400, len(dev)), random_state=0).values, c_,
+                                   [cst[cols.index(c)] for c in c_])
+        r["group effects (gate 5)"] = geff
+        r["weak groups (< %s)" % MIN_INPUT_EFFECT] = [g for g, e in geff.items() if e < MIN_INPUT_EFFECT]
         m, s, c = _fit(dev, "fire", cols, cst)
         r["LOCKED TEST"] = _report(test, pd.Series(m.predict_proba(s.transform(test[c].values))[:, 1], index=test.index),
                                    "fire", c)

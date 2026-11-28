@@ -92,3 +92,41 @@ def missing_failures(df, cols, era_start=None):
 def leakage_failures(cols):
     return [f"{c} is a benchmark or label-derived column, never an input"
             for c in cols if c.lower().startswith(FORBIDDEN_PREFIXES)]
+
+
+# Gate 5, per input group (Ido, 2026-11-26): overlapping inputs share their effect,
+# so each PHYSICAL FACTOR must matter, swept as a group. Members move together
+# toward "riskier": inputs whose constraint is -1 (wetter = safer) are swept in
+# reverse. Inputs outside every group are their own group.
+INPUT_GROUPS = {
+    "wind": ["wind", "gust_event", "offshore_event"],
+    "heat": ["air_temp_encoded", "temp_anom", "vpd_max_event"],
+    "moisture": ["humidity", "rh_min_event", "rh_anom", "fm100", "fm1000", "rain_7d", "soil", "kbdi"],
+    "vegetation": ["evi"],
+    "terrain": ["elevation", "slope", "southness"],
+}
+
+
+def group_effects(model, scaler, X_ref, cols, cst, n=15):
+    """{group: average-risk range when the group's inputs sweep their 5th-95th
+    percentile together}, on real rows X_ref (columns = cols)."""
+    X_ref = np.asarray(X_ref, float)
+    groups = {g: [c for c in m if c in cols] for g, m in INPUT_GROUPS.items()}
+    groups = {g: m for g, m in groups.items() if m}
+    for c in cols:
+        if not any(c in m for m in groups.values()):
+            groups[c] = [c]
+    out = {}
+    for g, members in groups.items():
+        idx = [cols.index(c) for c in members]
+        sign = [-1 if cst[i] < 0 else 1 for i in idx]
+        risks = []
+        for q in np.linspace(5, 95, n):
+            z = X_ref.copy()
+            for i, sg in zip(idx, sign):
+                col = X_ref[:, i][~np.isnan(X_ref[:, i])]
+                if len(col):
+                    z[:, i] = np.percentile(col, q if sg > 0 else 100 - q)
+            risks.append(model.predict_proba(scaler.transform(z))[:, 1].mean())
+        out[g] = round(float(max(risks) - min(risks)), 3)
+    return out
