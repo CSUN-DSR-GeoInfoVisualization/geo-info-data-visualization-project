@@ -26,12 +26,14 @@ def test_region_floor():
     assert any("south-low" in r for r in gates.region_failures(p2, y, lat, elev))
 
 
-def test_beats_reference_needs_a_real_gain():
+def test_beats_reference_needs_a_real_gain_on_auroc_and_brier():
     p, y = _data(signal=1.5)
     weak, _ = _data(signal=0.2, seed=5)
-    ref_good = p + np.random.default_rng(3).normal(0, 1e-6, len(p))   # same skill as the model
-    assert gates.beats_reference_failures(p, y, {"weak": weak}) == []
-    assert gates.beats_reference_failures(p, y, {"same": ref_good})
+    groups = np.arange(len(y)) % 10
+    assert gates.beats_reference_failures(p, y, {"weak": weak}, groups) == []
+    same = gates.beats_reference_failures(p, y, {"same": p.copy()}, groups)
+    assert any("AUROC" in f for f in same)                 # equal skill is not a win
+    assert gates.beats_reference_failures(p, y, {}) == ["reference comparison: no reference systems in this data"]
 
 
 def test_missing_and_leakage():
@@ -63,3 +65,14 @@ def test_group_calibration_is_monotonic_and_calibrated():
     p = m.predict_proba(s.transform(np.linspace(-2, 2, 9).reshape(-1, 1)))[:, 1]
     assert np.all(np.diff(p) >= -1e-9)                                  # direction preserved
     assert gates.calibration_failures(m.predict_proba(s.transform(x.reshape(-1, 1)))[:, 1], y) == []
+
+
+def test_scoreboard_and_operational_gate():
+    p, y = _data(signal=1.5)
+    weak, _ = _data(signal=0.2, seed=5)
+    board = gates.scoreboard(p, y, {"weak": weak}, np.arange(len(y)) % 10)
+    for k in ("AUROC", "PR-AUC", "Brier", "Brier skill", "log loss", "fire capture top 10%", "CSI top 10%",
+              "Heidke top 10%", "FAR top 10%", "lift top 10%"):
+        assert k in board["FireScope"] and k in board["weak"]
+    assert gates.operational_failures(board) == []
+    assert gates.operational_failures(gates.scoreboard(weak, y, {"strong": p}, np.arange(len(y)) % 10))

@@ -149,3 +149,33 @@ def soil_at(date_str, points):
                                        ("era5l_sm2", a.get(str(k), {}).get("volumetric_soil_water_layer_2")),
                                        ("smap_sm", b.get(str(k), {}).get("sm_surface"))) if v is not None}
             for k, _, _ in points}
+
+
+# Reference systems for the benchmark gate, from gridMET daily (never model inputs):
+# Fosberg Fire Weather Index (max temp, min RH, wind) and a Hot-Dry-Windy proxy (VPD x wind).
+BENCH2_COLS = ["bench_ffwi", "bench_hdw"]
+
+
+def _ffwi(tmax_c, rh, wind_ms):
+    t, u = tmax_c * 1.8 + 32, wind_ms * 2.237
+    m = (0.03229 + 0.281073 * rh - 0.000578 * rh * t if rh < 10 else
+         2.22749 + 0.160107 * rh - 0.01478 * t if rh < 50 else
+         21.0606 + 0.005565 * rh ** 2 - 0.00035 * rh * t - 0.483199 * rh)
+    eta = 1 - 2 * (m / 30) + 1.5 * (m / 30) ** 2 - 0.5 * (m / 30) ** 3
+    return eta * (1 + u ** 2) ** 0.5 / 0.3002
+
+
+def bench_at(date_str, points):
+    ee = _ee()
+    t = dt.date.fromisoformat(date_str)
+    gm = ee.ImageCollection("IDAHO_EPSCOR/GRIDMET").filterDate(date_str, str(t + dt.timedelta(days=1))).first()
+    res = _reduce(gm.select(["tmmx", "rmin", "vs", "vpd"]), points, 4000)
+    out = {}
+    for k, _, _ in points:
+        p = res.get(str(k), {})
+        if all(p.get(b) is not None for b in ("tmmx", "rmin", "vs", "vpd")):
+            out[str(k)] = {"bench_ffwi": round(_ffwi(p["tmmx"] - 273.15, p["rmin"], p["vs"]), 3),
+                           "bench_hdw": round(p["vpd"] * p["vs"], 4)}
+        else:
+            out[str(k)] = {}
+    return out
