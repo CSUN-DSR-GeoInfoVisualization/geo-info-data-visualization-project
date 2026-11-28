@@ -650,7 +650,8 @@ def batch_columns(args):
     its points): --kind normals (by calendar month) or soil (by date). Resumable."""
     from ml import fire_danger as fd
     fn, cols, group = {"normals": (lambda g, pts: fd.normals_at(int(g), pts), fd.NORMAL_COLS, lambda r: r["acq_date"][5:7]),
-                       "soil": (fd.soil_at, fd.SOIL_COLS, lambda r: r["acq_date"])}[args.kind]
+                       "soil": (fd.soil_at, fd.SOIL_COLS[:3], lambda r: r["acq_date"]),
+                       "gldas": (fd.gldas_at, fd.GLDAS_COLS, lambda r: r["acq_date"])}[args.kind]
     with open(args.inp, newline="") as f:
         rows = list(csv.DictReader(f))
     done = set()
@@ -886,7 +887,7 @@ if __name__ == "__main__":
     q.add_argument("--out", required=True)
     q.add_argument("--part", default="0/1")
     r_ = sub.add_parser("batch")
-    r_.add_argument("--kind", choices=["normals", "soil"], required=True)
+    r_.add_argument("--kind", choices=["normals", "soil", "gldas"], required=True)
     r_.add_argument("--inp", required=True)
     r_.add_argument("--out", required=True)
     lc = sub.add_parser("label-class")
