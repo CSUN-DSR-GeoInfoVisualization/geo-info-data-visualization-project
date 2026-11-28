@@ -273,27 +273,78 @@ def evaluate_b(g, d):
     return out
 
 
+class _Combined:
+    """Live risk = P_A(start) x P_B(large | start), Architecture v2. Both models read the
+    same column list, so group effects sweep an input through both at once."""
+
+    def __init__(self, ma, sa, ca, mb, sb, cb, cols):
+        self.a, self.b, self.cols = (ma, sa, ca), (mb, sb, cb), cols
+
+    def predict_proba(self, X):
+        X = pd.DataFrame(np.asarray(X, float), columns=self.cols)
+        pa = self.a[0].predict_proba(self.a[1].transform(X[self.a[2]].values))[:, 1]
+        pb = self.b[0].predict_proba(self.b[1].transform(X[self.b[2]].values))[:, 1]
+        p = pa * pb
+        return np.c_[1 - p, p]
+
+
+def evaluate_combined(d, g):
+    """A5c: the score the map shows, judged on 'a wildfire that grows >= LARGE_ACRES starts
+    here today' (confirmed fires that grew large vs all Model A controls)."""
+    a = model_a_rows(d, False).copy()
+    year = a["acq_date"].str[:4].astype(int)
+    pair_year = np.where(a["control_type"].eq("same_place"), year + 1, year)
+    region = gates.region_of(a["lat"].values, pd.to_numeric(a["elevation"]).values)
+    locked = np.isin(pair_year, LOCKED_YEARS) | (region == LOCKED_REGION)
+    a["_grp"] = pair_year // 5
+    a["large_start"] = ((a["fire"] == 1) & (pd.to_numeric(a["fire_acres"], errors="coerce").fillna(0) >= LARGE_ACRES)).astype(int)
+    small = d[(d["fire"] == 1) & (d["label_class"] == "wildfire_confirmed") & d["fire_id"].isna()]
+    b = pd.concat([g, small], ignore_index=True)
+    b["large"] = (pd.to_numeric(b["fire_acres"], errors="coerce").fillna(0) >= LARGE_ACRES).astype(int)
+    by = b["acq_date"].str[:4].astype(int)
+    b["_grp"] = by // 5
+    b_dev = b[~(np.isin(by, LOCKED_YEARS) | (gates.region_of(b["lat"].values, pd.to_numeric(b["elevation"]).values) == LOCKED_REGION))]
+    dev, test = a[~locked], a[locked]
+    ma, sa, ca = _fit(dev, "fire", COLS, CST)
+    mb, sb, cb = _fit(b_dev, "large", COLS, CST)
+    cols = sorted(set(ca) | set(cb), key=COLS.index)
+    comb = _Combined(ma, sa, ca, mb, sb, cb, cols)
+    out = {"rows": {"dev": int(len(dev)), "locked test": int(len(test)), "large starts (locked)": int(test["large_start"].sum())}}
+    for name, part in (("dev (in-sample for A, B trained without locked)", dev), ("LOCKED TEST", test)):
+        p = pd.Series(comb.predict_proba(part[cols].values)[:, 1], index=part.index)
+        out[name] = _report(part, p, "large_start", cols)
+    out["group effects on A x B (gate 5)"] = gates.group_effects(
+        comb, _Identity(), dev[cols].sample(min(400, len(dev)), random_state=0).values, cols,
+        [CST[COLS.index(c)] for c in cols])
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", default=WEATHERAPP)
     ap.add_argument("--growth", default=GROWTH)
     ap.add_argument("--weights")
+    ap.add_argument("--only", choices=["combined"], help="run only the combined A x B evaluation")
     a = ap.parse_args()
     weights = json.load(open(a.weights))["weights"] if a.weights else None
     d = pd.read_csv(a.data, low_memory=False, dtype={"lat": str, "lon": str})
     d["pair_key"] = d["lat"] + "," + d["lon"] + "," + d["acq_date"]  # same text key the spatial step wrote
     d["lat"], d["lon"] = pd.to_numeric(d["lat"]), pd.to_numeric(d["lon"])
     d = build_inputs(d, weights)
-    out = {"weights": "station-measured" if weights else "PROVISIONAL equal weights (not promotable)",
-           "Model A (burnable random spots)": evaluate_a(d, True),
-           "Model A (all random spots)": evaluate_a(d, False)}
+    out = {"weights": "station-measured" if weights else "PROVISIONAL equal weights (not promotable)"}
+    if a.only != "combined":
+        out["Model A (burnable random spots)"] = evaluate_a(d, True)
+        out["Model A (all random spots)"] = evaluate_a(d, False)
     try:
         g = pd.read_csv(a.growth, low_memory=False)
     except FileNotFoundError:
         g = None
     if g is not None and len(g):
         g["control_type"] = ""
-        out["Model B (grows >= %d acres)" % LARGE_ACRES] = evaluate_b(build_inputs(g, weights), d)
+        g = build_inputs(g, weights)
+        if a.only != "combined":
+            out["Model B (grows >= %d acres)" % LARGE_ACRES] = evaluate_b(g, d)
+        out["Combined A x B (large wildfire starts)"] = evaluate_combined(d, g)
     print(json.dumps(out, indent=1, default=str))
 
 
