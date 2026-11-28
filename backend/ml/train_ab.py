@@ -177,6 +177,30 @@ def evaluate_a(d, burnable_only=True):
     return out
 
 
+def evaluate_b(g, d):
+    """Model B: growth-set fires (first detection, start-day weather) plus confirmed
+    wildfires with no mapped perimeter (they stayed small); large = >= LARGE_ACRES."""
+    small = d[(d["fire"] == 1) & (d["label_class"] == "wildfire_confirmed") & d["fire_id"].isna()]
+    b = pd.concat([g, small], ignore_index=True)
+    b["large"] = (pd.to_numeric(b["fire_acres"], errors="coerce").fillna(0) >= LARGE_ACRES).astype(int)
+    year = b["acq_date"].str[:4].astype(int)
+    region = gates.region_of(b["lat"].values, pd.to_numeric(b["elevation"]).values)
+    locked = np.isin(year, LOCKED_YEARS) | (region == LOCKED_REGION)
+    b["_grp"] = year // 5
+    dev, test = b[~locked], b[locked]
+    out = {"rows": {"dev": int(len(dev)), "locked test": int(len(test)), "large": int(b["large"].sum()),
+                    "not large": int((1 - b["large"]).sum())}}
+    for name, cols, cst in (("base 6", FEATURE_COLS, CST[:6]), ("all inputs", COLS, CST)):
+        r = {"held-out years": _report(dev, _cv(dev, "large", dev["_grp"], cols, cst), "large", cols)}
+        m, s, c = _fit(dev, "large", cols, cst)
+        r["group effects (gate 5)"] = gates.group_effects(m, s, dev[c].sample(min(400, len(dev)), random_state=0).values, c,
+                                                          [cst[cols.index(x)] for x in c])
+        r["LOCKED TEST"] = _report(test, pd.Series(m.predict_proba(s.transform(test[c].values))[:, 1], index=test.index),
+                                   "large", c)
+        out[name] = r
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", default=WEATHERAPP)
@@ -191,6 +215,13 @@ def main():
     out = {"weights": "station-measured" if weights else "PROVISIONAL equal weights (not promotable)",
            "Model A (burnable random spots)": evaluate_a(d, True),
            "Model A (all random spots)": evaluate_a(d, False)}
+    try:
+        g = pd.read_csv(a.growth, low_memory=False)
+    except FileNotFoundError:
+        g = None
+    if g is not None and len(g):
+        g["control_type"] = ""
+        out["Model B (grows >= %d acres)" % LARGE_ACRES] = evaluate_b(build_inputs(g, weights), d)
     print(json.dumps(out, indent=1, default=str))
 
 
