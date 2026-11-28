@@ -100,3 +100,14 @@ def test_design_weights_accepts_explicit_row_weights():
     from ml.gates import design_weights
     w = np.array([0.5, 2.0, 1.0])
     assert design_weights([0, 1, 0], w) is w
+
+
+def test_skill_weights_change_ranking_measures_and_uniform_weights_do_not():
+    import numpy as np
+    from ml.gates import _skill
+    rng = np.random.default_rng(0)
+    y = rng.integers(0, 2, 400); s = y + rng.normal(0, 1, 400)
+    a, b = _skill(s, y), _skill(s, y, w=np.full(400, 3.0))
+    assert a["AUROC"] == b["AUROC"] and a["fire capture top 10%"] == b["fire capture top 10%"]
+    w = np.where((y == 1) & (s < 1), 10.0, 1.0)  # up-weight hard positives
+    assert _skill(s, y, w=w)["AUROC"] < a["AUROC"]

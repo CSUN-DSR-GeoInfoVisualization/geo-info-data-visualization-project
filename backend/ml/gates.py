@@ -109,7 +109,7 @@ def beats_reference_failures(p, y, references, groups=None, seed=0, ref_probs=No
         for _ in range(BOOT):
             i = rng.integers(0, len(yy), len(yy))
             if len(np.unique(yy[i])) == 2:
-                da.append(roc_auc_score(yy[i], pp[i]) - roc_auc_score(yy[i], ss[i]))
+                da.append(roc_auc_score(yy[i], pp[i], sample_weight=ww[i]) - roc_auc_score(yy[i], ss[i], sample_weight=ww[i]))
                 j = i[m[i]]
                 if len(np.unique(yy[j])) == 2:
                     db.append(brier_score_loss(yy[j], cal[j], sample_weight=ww[j]) - brier_score_loss(yy[j], pp[j], sample_weight=ww[j]))
@@ -174,6 +174,12 @@ def group_effects(model, scaler, X_ref, cols, cst, n=15):
     return out
 
 
+def _weighted_quantile(x, w, q):
+    o = np.argsort(x)
+    c = np.cumsum(w[o]) / w.sum()
+    return x[o][min(np.searchsorted(c, q), len(x) - 1)]
+
+
 def _skill(score, y, prob=None, w=None):
     """Standard fire-danger / forecast verification measures for one score (w: design weights
     for the probability measures)."""
@@ -181,17 +187,19 @@ def _skill(score, y, prob=None, w=None):
     score, y = np.asarray(score, float), np.asarray(y)
     w = np.ones(len(y)) if w is None else np.asarray(w, float)
     base = np.average(y, weights=w)
-    out = {"AUROC": roc_auc_score(y, score), "PR-AUC": average_precision_score(y, score)}
+    uniform = np.allclose(w, w[0])
+    # ranking and alarm measures use the same design weights as Brier (2026-11-28: they were unweighted)
+    out = {"AUROC": roc_auc_score(y, score, sample_weight=w), "PR-AUC": average_precision_score(y, score, sample_weight=w)}
     if prob is not None:
         prob = np.clip(np.asarray(prob, float), 1e-6, 1 - 1e-6)
         b = brier_score_loss(y, prob, sample_weight=w)
         out.update({"Brier": b, "Brier skill": 1 - b / (base * (1 - base)), "log loss": log_loss(y, prob, sample_weight=w)})
     for top in (0.20, 0.10, 0.03):  # alarm levels: the riskiest 20% / 10% / 3% of rows
-        cut = np.quantile(score, 1 - top)
+        cut = np.quantile(score, 1 - top) if uniform else _weighted_quantile(score, w, 1 - top)
         alarm = score >= cut
-        hits, fa, miss = (alarm & (y == 1)).sum(), (alarm & (y == 0)).sum(), (~alarm & (y == 1)).sum()
-        cn = (~alarm & (y == 0)).sum()
-        n = len(y)
+        hits, fa, miss = w[alarm & (y == 1)].sum(), w[alarm & (y == 0)].sum(), w[~alarm & (y == 1)].sum()
+        cn = w[~alarm & (y == 0)].sum()
+        n = w.sum()
         exp = ((hits + miss) * (hits + fa) + (cn + miss) * (cn + fa)) / n
         out[f"fire capture top {int(top*100)}%"] = hits / max(hits + miss, 1)          # POD
         if top == 0.10:
@@ -235,7 +243,7 @@ def operational_failures(board):
     return out
 
 
-def fit_reference_probs(train_refs, train_y, test_refs):
+def fit_reference_probs(train_refs, train_y, test_refs, train_w=None):
     """Reference systems calibrated on the TRAINING rows (one-input logistic each) and
     applied to the test rows: the same data the model's own calibration saw."""
     from sklearn.linear_model import LogisticRegression
@@ -244,7 +252,8 @@ def fit_reference_probs(train_refs, train_y, test_refs):
         sc, y = np.asarray(sc, float), np.asarray(train_y)
         ok = ~np.isnan(sc)
         if ok.sum() >= 200 and len(np.unique(y[ok])) == 2 and name in test_refs:
-            lr = LogisticRegression().fit(sc[ok].reshape(-1, 1), y[ok])
+            lr = LogisticRegression().fit(sc[ok].reshape(-1, 1), y[ok],
+                                          sample_weight=None if train_w is None else np.asarray(train_w)[ok])
             t = np.asarray(test_refs[name], float)
             pr = np.full(len(t), np.nan)
             tok = ~np.isnan(t)
