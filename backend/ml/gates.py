@@ -207,7 +207,8 @@ def _skill(score, y, prob=None, w=None):
             out["CSI top 10%"] = hits / max(hits + fa + miss, 1e-12)
             out["Heidke top 10%"] = (hits + cn - exp) / max(n - exp, 1e-12)
             out["lift top 10%"] = (hits / max(hits + fa, 1e-12)) / max(base, 1e-12)
-    return {k: round(float(v), 4) for k, v in out.items()}
+    # 4 significant digits: rare-event CSI/FAR live below 1e-3 and 4 decimals tied them (2026-11-28)
+    return {k: float(f"{float(v):.4g}") for k, v in out.items()}
 
 
 def scoreboard(p, y, references, groups=None, ref_probs=None, target_share=None):

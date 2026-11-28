@@ -315,8 +315,8 @@ class _Combined:
     """Live risk = P_A(start) x P_B(large | start), Architecture v2. Both models read the
     same column list, so group effects sweep an input through both at once."""
 
-    def __init__(self, ma, sa, ca, mb, sb, cb, cols, cal=None):
-        self.a, self.b, self.cols, self.cal = (ma, sa, ca), (mb, sb, cb), cols, cal
+    def __init__(self, ma, sa, ca, mb, sb, cb, cols, cal=None, pi_ref=None):
+        self.a, self.b, self.cols, self.cal, self.pi_ref = (ma, sa, ca), (mb, sb, cb), cols, cal, pi_ref
 
     def raw(self, X):
         X = pd.DataFrame(np.asarray(X, float), columns=self.cols)
@@ -324,10 +324,13 @@ class _Combined:
         pb = self.b[0].predict_proba(self.b[1].transform(X[self.b[2]].values))[:, 1]
         return pa * pb
 
-    def predict_proba(self, X):
+    def predict_proba(self, X, pi=None):
         p = self.raw(X)
         if self.cal is not None:  # monotonic in the product, so ranking is unchanged
             p = self.cal.predict_proba(np.log(np.clip(p, 1e-6, 1)).reshape(-1, 1))[:, 1]
+        if pi is not None and self.pi_ref:  # A5e: shift to each row's region x month start rate
+            from ml.absolute_risk import _logit
+            p = 1 / (1 + np.exp(-(_logit(p) + _logit(pi) - _logit(self.pi_ref))))
         return np.c_[1 - p, p]
 
 
@@ -336,17 +339,21 @@ class _Combined:
 LARGE_SHARE_OF_STARTS = 1185 / 200113
 
 
+def _row_pi(rows):
+    """Historical wildfire-start chance per tile-day for each row's region x month (FPA FOD)."""
+    import os
+    rates = json.load(open(os.path.join(os.path.dirname(__file__), "models", "base_rates_v0.json")))["pi"]
+    region = gates.region_of(rows["lat"].values, pd.to_numeric(rows["elevation"]).values)
+    return np.array([rates[r][str(m)] for r, m in zip(region, rows["acq_date"].str[5:7].astype(int).values)])
+
+
 def _population_weights(rows):
     """Combined-test design weights for the full real mix (2026-11-28): large vs small fires at the
     FPA FOD ratio, and fire vs no-fire tile-days at the historical start rate pi for each row's
     region x month (ml/models/base_rates_v0.json). References get the same weights."""
-    import os
-    rates = json.load(open(os.path.join(os.path.dirname(__file__), "models", "base_rates_v0.json")))["pi"]
     fire = rows["fire"].values == 1
     large = rows["large_start"].values == 1
-    region = gates.region_of(rows["lat"].values, pd.to_numeric(rows["elevation"]).values)
-    month = rows["acq_date"].str[5:7].astype(int).values
-    pi_bar = float(np.mean([rates[r][str(m)] for r, m in zip(region, month)]))
+    pi_bar = float(np.mean(_row_pi(rows)))
     w = np.ones(len(rows))
     nf, nl, nc = fire.sum(), (fire & large).sum(), (~fire).sum()
     if nl and nf > nl and nc:
@@ -387,10 +394,10 @@ def evaluate_combined(d, g):
     w_dev = _population_weights(dev)
     cal = LogisticRegression().fit(np.log(np.clip(pa_oof.values[ok] * pb_dev[ok], 1e-6, 1)).reshape(-1, 1),
                                    dev["large_start"].values[ok], sample_weight=w_dev[ok])
-    comb = _Combined(ma, sa, ca, mb, sb, cb, cols, cal)
+    comb = _Combined(ma, sa, ca, mb, sb, cb, cols, cal, pi_ref=float(np.mean(_row_pi(dev))))
     out = {"rows": {"dev": int(len(dev)), "locked test": int(len(test)), "large starts (locked)": int(test["large_start"].sum())}}
     for name, part in (("dev (in-sample for A, B trained without locked)", dev), ("LOCKED TEST", test)):
-        p = pd.Series(comb.predict_proba(part[cols].values)[:, 1], index=part.index)
+        p = pd.Series(comb.predict_proba(part[cols].values, pi=_row_pi(part))[:, 1], index=part.index)
         out[name] = _report(part, p, "large_start", cols, ref_train=(dev, "large_start") if part is test else None,
                             w=_population_weights(part), w_train=w_dev)
     # root-cause diagnostic (2026-11-28): which part loses ranking on the large-start target?
