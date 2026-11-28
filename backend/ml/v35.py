@@ -27,6 +27,8 @@ logger = logging.getLogger(__name__)
 ARTIFACT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "v35_ab.pkl")
 GRID_KEY = "v35_grid"
 GRID_MAX_AGE_H = 36
+V35_INPUTS = ("gust_event", "offshore_event", "rh_min_event", "vpd_max_event", "rain_7d", "fm100", "fm1000",
+              "temp_anom", "rh_anom", "soil", "slope", "southness")
 PCT_CUTS = [0, 60, 80, 90, 97, 100]          # percentile class edges (Ido, 2026-11-26)
 DISPLAY = [0, 0.2, 0.4, 0.6, 0.8, 1.0]       # the site's Low/Moderate/High/Very High/Extreme bands
 
@@ -194,7 +196,12 @@ def build_grid(date, get_feature, get_weather):
             "probability": float(f"{s.probability[i]:.4g}"), "percentile": round(float(s.percentile[i]), 1),
             "inputs_filled": round(float(filled[i]), 2),
             "features": {k: (None if pd.isna(r.get(k)) else float(r.get(k)))
-                         for k in ("evi", "air_temp_encoded", "wind", "humidity", "elevation", "kbdi")}}
+                         for k in ("evi", "air_temp_encoded", "wind", "humidity", "elevation", "kbdi")},
+            # v3.5 inputs as the model saw them (blended from >= 2 sources) + official indices for comparison
+            "inputs": {k: (None if pd.isna(built.at[i, k]) else round(float(built.at[i, k]), 3)) for k in V35_INPUTS},
+            "official": {k: (None if pd.isna(r.get(c)) else round(float(r.get(c)), 1))
+                         for k, c in (("erc", "bench_erc"), ("bi", "bench_bi"),
+                                      ("fm100", "gridmet_fm100"), ("fm1000", "gridmet_fm1000"))}}
     return {"date": str(date), "model": "v3.5", "built_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
             "tiles": tiles, "inputs_filled_mean": round(float(filled.mean()), 3)}
 
