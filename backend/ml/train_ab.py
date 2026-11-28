@@ -276,6 +276,38 @@ def evaluate_b(g, d):
     return out
 
 
+class _CrossFit:
+    """Average of the fold models whose out-of-fold scores trained the calibration layer
+    (cross-fitting), so test predictions and their calibration come from the same models.
+    Root-cause fix 2026-11-27: a full refit was sharper than the out-of-fold scores it was
+    calibrated on, leaving probabilities overconfident (ECE 0.11)."""
+
+    def __init__(self, fits):
+        self.fits = fits
+
+    def predict_proba(self, X):
+        p = np.mean([m.predict_proba(s.transform(X))[:, 1] for m, s in self.fits], axis=0)
+        return np.c_[1 - p, p]
+
+
+def _cv_fits(d, label, group, cols, cst, k=5):
+    """Out-of-fold predictions plus the fold models (for cross-fitting)."""
+    keep = [c for c in cols if d[c].notna().any()]
+    p = pd.Series(np.nan, index=d.index)
+    g = pd.factorize(group)[0] % k
+    fits = []
+    for f in range(k):
+        tr, te = g != f, g == f
+        if not te.any() or d.loc[tr, label].nunique() < 2:
+            continue
+        m, s, c = _fit(d[tr], label, keep, [cst[cols.index(x)] for x in keep])
+        if c != keep:
+            continue
+        p[te] = m.predict_proba(s.transform(d.loc[te, c].values))[:, 1]
+        fits.append((m, s))
+    return p, _CrossFit(fits), keep
+
+
 class _Combined:
     """Live risk = P_A(start) x P_B(large | start), Architecture v2. Both models read the
     same column list, so group effects sweep an input through both at once."""
@@ -313,14 +345,14 @@ def evaluate_combined(d, g):
     b["_grp"] = by // 5
     b_dev = b[~(np.isin(by, LOCKED_YEARS) | (gates.region_of(b["lat"].values, pd.to_numeric(b["elevation"]).values) == LOCKED_REGION))]
     dev, test = a[~locked], a[locked]
-    ma, sa, ca = _fit(dev, "fire", COLS, CST)
+    pa_oof, ma, ca = _cv_fits(dev, "fire", dev["_grp"], COLS, CST)
+    sa = _Identity()
     mb, sb, cb = _fit(b_dev, "large", COLS, CST)
     cols = sorted(set(ca) | set(cb), key=COLS.index)
     # Calibration layer (root-cause fix 2026-11-27: the raw product P_A x P_B answers no single
     # question, Brier 0.247 vs ERC 0.208): out-of-fold P_A on dev (year blocks) times P_B, then
     # a logistic on log(product) for the large-start target. Monotonic, so ranking is unchanged.
     from sklearn.linear_model import LogisticRegression
-    pa_oof = _cv(dev, "fire", dev["_grp"], COLS, CST)
     pb_dev = mb.predict_proba(sb.transform(dev[cb].values))[:, 1]
     ok = pa_oof.notna().values
     cal = LogisticRegression().fit(np.log(np.clip(pa_oof.values[ok] * pb_dev[ok], 1e-6, 1)).reshape(-1, 1),
