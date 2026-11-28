@@ -41,3 +41,14 @@ def test_missing_and_leakage():
     assert gates.leakage_failures(["evi", "bench_erc", "rfw"]) == [
         "bench_erc is a benchmark or label-derived column, never an input",
         "rfw is a benchmark or label-derived column, never an input"]
+
+
+def test_group_effects_sum_overlapping_inputs():
+    # two copies of one signal: each alone moves risk a little, together a lot
+    from ml.train_monotonic import train_monotonic
+    rng = np.random.default_rng(0); n = 3000
+    x = rng.normal(0, 1, n); y = (rng.uniform(size=n) < 1 / (1 + np.exp(-2 * x))).astype(int)
+    X = np.c_[x + rng.normal(0, .1, n), x + rng.normal(0, .1, n)]
+    m, s = train_monotonic(X, y, monotonic_cst=[1, 1])
+    g = gates.group_effects(m, s, X[:300], ["wind", "gust_event"], [1, 1])
+    assert set(g) == {"wind"} and g["wind"] >= 0.3
