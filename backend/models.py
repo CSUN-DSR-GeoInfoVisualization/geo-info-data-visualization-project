@@ -7,6 +7,22 @@ from werkzeug.security import generate_password_hash, check_password_hash
 db = SQLAlchemy()
 migrate = Migrate()
 
+
+def merge_commit(row):
+    """Upsert one cache row and commit. merge() reads, then inserts, so two threads filling the
+    same tile both insert and one hits the primary key (KBDI digest 2026-11-28); after that error
+    the row exists, so a second merge updates it."""
+    from sqlalchemy.exc import IntegrityError
+    for attempt in (0, 1):
+        try:
+            db.session.merge(row)
+            db.session.commit()
+            return
+        except IntegrityError:
+            db.session.rollback()
+            if attempt:
+                raise
+
 class Role(db.Model):
     __tablename__ = 'roles'
     id = db.Column(db.Integer, primary_key=True)

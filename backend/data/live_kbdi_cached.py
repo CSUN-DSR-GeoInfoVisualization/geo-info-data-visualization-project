@@ -59,10 +59,8 @@ def get_kbdi_cached(lat: float, lon: float) -> float:
         raise
 
     try:
-        db.session.merge(FeatureCacheKbdi(
-            tile_lat=tlat, tile_lon=tlon, kbdi=value, source="nasa_power",
-        ))
-        db.session.commit()
+        from models import merge_commit
+        merge_commit(FeatureCacheKbdi(tile_lat=tlat, tile_lon=tlon, kbdi=value, source="nasa_power"))
     except Exception as e:
         logger.warning("KBDI cache write failed at %s,%s: %s", lat, lon, e)
         db.session.rollback()

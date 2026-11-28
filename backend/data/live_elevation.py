@@ -93,10 +93,8 @@ def get_elevation(lat: float, lon: float) -> float:
         raise RuntimeError(f"USGS, Earth Engine 3DEP and Open-Elevation all failed at {lat},{lon}")
 
     try:
-        db.session.merge(FeatureCacheElevation(
-            tile_lat=tlat, tile_lon=tlon, elevation_m=elev, source=source,
-        ))
-        db.session.commit()
+        from models import merge_commit
+        merge_commit(FeatureCacheElevation(tile_lat=tlat, tile_lon=tlon, elevation_m=elev, source=source))
     except Exception as e:
         logger.warning("Elevation cache write failed at %s,%s: %s", lat, lon, e)
         db.session.rollback()
