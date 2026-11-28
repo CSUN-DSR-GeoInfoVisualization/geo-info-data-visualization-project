@@ -184,7 +184,7 @@ def apply_correction(values, region, corr):
     out = dict(values)
     for k, v in values.items():
         c = corr.get("corrections", {}).get(k)
-        if c is not None:
+        if c is not None and c["mae_after"] < c["mae_before"]:  # apply only where it measurably helps
             slope, icpt = c.get(region, c["all"])
             out[k] = slope * v + icpt
     return out
