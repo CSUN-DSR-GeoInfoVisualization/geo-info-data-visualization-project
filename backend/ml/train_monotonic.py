@@ -45,7 +45,7 @@ HGB_PARAMS = dict(
 )
 
 
-def train_monotonic(X, y, calibrate=True, monotonic_cst=None):
+def train_monotonic(X, y, calibrate=True, monotonic_cst=None, groups=None):
     """Fit StandardScaler + monotonic HGB, optionally isotonic-calibrated.
 
     StandardScaler has a strictly-positive scale_, so the monotonic direction is
@@ -64,9 +64,46 @@ def train_monotonic(X, y, calibrate=True, monotonic_cst=None):
     if not calibrate:
         base.fit(Xs, y)
         return base, scaler
+    if groups is not None:
+        # Grouped calibration (2026-11-27): random calibration folds mixed years and
+        # fire/control pairs and fit each model on 80% of rows, which flattened the
+        # probabilities (held-out AUROC 0.661 vs 0.698 uncalibrated). Fit the model on
+        # every row, then one sigmoid on out-of-fold scores with whole groups held out.
+        return GroupCalibrated.fit(base, Xs, y, groups), scaler
     model = CalibratedClassifierCV(estimator=base, method="isotonic", cv=5)
     model.fit(Xs, y)
     return model, scaler
+
+
+class GroupCalibrated:
+    """A monotonic HGB plus a sigmoid fitted on group-held-out scores. Sigmoid is
+    monotonic, so the physics direction is preserved."""
+
+    def __init__(self, model, calibrator):
+        self.model, self.calibrator = model, calibrator
+
+    @classmethod
+    def fit(cls, base, Xs, y, groups, k=5):
+        from sklearn.base import clone
+        from sklearn.linear_model import LogisticRegression
+        y = np.asarray(y)
+        fold = pd_factorize(groups) % k
+        oof = np.full(len(y), np.nan)
+        for f in range(k):
+            tr, te = fold != f, fold == f
+            if te.any() and len(np.unique(y[tr])) == 2:
+                oof[te] = clone(base).fit(Xs[tr], y[tr]).decision_function(Xs[te])
+        ok = ~np.isnan(oof)
+        cal = LogisticRegression().fit(oof[ok].reshape(-1, 1), y[ok])
+        return cls(clone(base).fit(Xs, y), cal)
+
+    def predict_proba(self, X):
+        return self.calibrator.predict_proba(self.model.decision_function(X).reshape(-1, 1))
+
+
+def pd_factorize(groups):
+    _, codes = np.unique(np.asarray(groups).astype(str), return_inverse=True)
+    return codes
 
 
 def validate_monotonicity(model, scaler, n=25, tol=1e-6, X_ref=None):

@@ -52,3 +52,14 @@ def test_group_effects_sum_overlapping_inputs():
     m, s = train_monotonic(X, y, monotonic_cst=[1, 1])
     g = gates.group_effects(m, s, X[:300], ["wind", "gust_event"], [1, 1])
     assert set(g) == {"wind"} and g["wind"] >= 0.3
+
+
+def test_group_calibration_is_monotonic_and_calibrated():
+    from ml.train_monotonic import train_monotonic
+    rng = np.random.default_rng(4); n = 4000
+    x = rng.normal(0, 1, n); y = (rng.uniform(size=n) < 1 / (1 + np.exp(-1.5 * x))).astype(int)
+    groups = rng.integers(0, 10, n)
+    m, s = train_monotonic(x.reshape(-1, 1), y, monotonic_cst=[1], groups=groups)
+    p = m.predict_proba(s.transform(np.linspace(-2, 2, 9).reshape(-1, 1)))[:, 1]
+    assert np.all(np.diff(p) >= -1e-9)                                  # direction preserved
+    assert gates.calibration_failures(m.predict_proba(s.transform(x.reshape(-1, 1)))[:, 1], y) == []
