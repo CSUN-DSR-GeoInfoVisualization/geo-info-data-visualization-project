@@ -76,3 +76,13 @@ def test_scoreboard_and_operational_gate():
         assert k in board["FireScope"] and k in board["weak"]
     assert gates.operational_failures(board) == []
     assert gates.operational_failures(gates.scoreboard(weak, y, {"strong": p}, np.arange(len(y)) % 10))
+
+
+def test_grouped_calibration_survives_an_input_missing_from_whole_years():
+    from ml.train_monotonic import train_monotonic
+    rng = np.random.default_rng(6); n = 3000
+    x = rng.normal(0, 1, n); y = (rng.uniform(size=n) < 1 / (1 + np.exp(-x))).astype(int)
+    years = rng.integers(0, 10, n)
+    gust = np.where(years >= 6, x + rng.normal(0, .5, n), np.nan)   # exists only in later years
+    m, s = train_monotonic(np.c_[x, gust], y, monotonic_cst=[1, 1], groups=years // 2)
+    assert np.isfinite(m.predict_proba(s.transform(np.c_[x, gust]))).all()
