@@ -364,9 +364,9 @@ def _population_weights(rows):
     return w
 
 
-def evaluate_combined(d, g):
-    """A5c: the score the map shows, judged on 'a wildfire that grows >= LARGE_ACRES starts
-    here today' (confirmed fires that grew large vs all Model A controls)."""
+def combined_rows(d, g):
+    """Rows for the combined score: (A rows with large_start, B rows with large, A locked mask,
+    B locked mask). Shared by the evaluation and the shipped v3.5 model (ml.v35)."""
     a = model_a_rows(d, False).copy()
     year = a["acq_date"].str[:4].astype(int)
     pair_year = np.where(a["control_type"].eq("same_place"), year + 1, year)
@@ -379,22 +379,33 @@ def evaluate_combined(d, g):
     b["large"] = (pd.to_numeric(b["fire_acres"], errors="coerce").fillna(0) >= LARGE_ACRES).astype(int)
     by = b["acq_date"].str[:4].astype(int)
     b["_grp"] = by // 5
-    b_dev = b[~(np.isin(by, LOCKED_YEARS) | (gates.region_of(b["lat"].values, pd.to_numeric(b["elevation"]).values) == LOCKED_REGION))]
-    dev, test = a[~locked], a[locked]
+    b_locked = np.isin(by, LOCKED_YEARS) | (gates.region_of(b["lat"].values, pd.to_numeric(b["elevation"]).values) == LOCKED_REGION)
+    return a, b, locked, b_locked
+
+
+def fit_combined(dev, b_dev):
+    """Fit A (cross-fit), B and the weighted calibration layer -> (_Combined, out-of-fold P_A)."""
+    from sklearn.linear_model import LogisticRegression
     pa_oof, ma, ca = _cv_fits(dev, "fire", dev["_grp"], COLS, CST)
-    sa = _Identity()
     mb, sb, cb = _fit(b_dev, "large", COLS, CST)
     cols = sorted(set(ca) | set(cb), key=COLS.index)
-    # Calibration layer (root-cause fix 2026-11-27: the raw product P_A x P_B answers no single
-    # question, Brier 0.247 vs ERC 0.208): out-of-fold P_A on dev (year blocks) times P_B, then
-    # a logistic on log(product) for the large-start target. Monotonic, so ranking is unchanged.
-    from sklearn.linear_model import LogisticRegression
     pb_dev = mb.predict_proba(sb.transform(dev[cb].values))[:, 1]
     ok = pa_oof.notna().values
     w_dev = _population_weights(dev)
     cal = LogisticRegression().fit(np.log(np.clip(pa_oof.values[ok] * pb_dev[ok], 1e-6, 1)).reshape(-1, 1),
                                    dev["large_start"].values[ok], sample_weight=w_dev[ok])
-    comb = _Combined(ma, sa, ca, mb, sb, cb, cols, cal, pi_ref=float(np.mean(_row_pi(dev))))
+    return _Combined(ma, _Identity(), ca, mb, sb, cb, cols, cal, pi_ref=float(np.mean(_row_pi(dev))))
+
+
+def evaluate_combined(d, g):
+    """A5c: the score the map shows, judged on 'a wildfire that grows >= LARGE_ACRES starts
+    here today' (confirmed fires that grew large vs all Model A controls)."""
+    a, b, locked, b_locked = combined_rows(d, g)
+    b_dev = b[~b_locked]
+    dev, test = a[~locked], a[locked]
+    comb = fit_combined(dev, b_dev)
+    cols, w_dev = comb.cols, _population_weights(dev)
+    (ma, sa, ca), (mb, sb, cb) = comb.a, comb.b
     out = {"rows": {"dev": int(len(dev)), "locked test": int(len(test)), "large starts (locked)": int(test["large_start"].sum())}}
     for name, part in (("dev (in-sample for A, B trained without locked)", dev), ("LOCKED TEST", test)):
         p = pd.Series(comb.predict_proba(part[cols].values, pi=_row_pi(part))[:, 1], index=part.index)

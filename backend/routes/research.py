@@ -256,6 +256,34 @@ def get_cached_zone_risk(zone_type: str, zone_id: str) -> dict | None:
     return bucket.get(zone_id)
 
 
+_V35_MEM: dict = {}  # {"grid": payload, "loaded": epoch}; reloaded from the DB hourly (multi-worker)
+
+
+def _v35_grid() -> dict | None:
+    """Latest v3.5 tile grid if built within GRID_MAX_AGE_H, else None so v3.4 serves (a model
+    is always live). Never raises."""
+    try:
+        from ml import v35
+        if not _V35_MEM.get("grid") or time.time() - _V35_MEM.get("loaded", 0) > 3600:
+            row = _load_cache_from_db(v35.GRID_KEY)
+            if row and row.get("data"):
+                _V35_MEM.update(grid=row["data"], loaded=time.time())
+        g = _V35_MEM.get("grid")
+        if not g:
+            return None
+        age_h = (datetime.now(timezone.utc) - datetime.fromisoformat(g["built_at"])).total_seconds() / 3600
+        return g if age_h <= v35.GRID_MAX_AGE_H else None
+    except Exception as e:
+        logger.warning("v3.5 grid unavailable, serving v3.4: %s", e)
+        return None
+
+
+def _v35_point(grid: dict, lat: float, lon: float) -> dict | None:
+    from ml import v35
+    hit = v35.lookup(grid, lat, lon)
+    return {**hit, "data_quality": "live", "model": "v3.5", "grid_date": grid.get("date")} if hit else None
+
+
 def _compute_zone_risk(zone_type: str) -> dict | None:
     """Heavy path: load boundaries, fetch live weather, batch-predict per centroid."""
     filepath = os.path.join(_BOUNDARIES_DIR, f'{zone_type}.json')
@@ -284,6 +312,18 @@ def _compute_zone_risk(zone_type: str) -> dict | None:
         if not centroid:
             continue
         sampled.append((name, centroid[0], centroid[1]))
+
+    grid = _v35_grid()
+    if grid:
+        v35_risk = {name: _v35_point(grid, lat, lon) for name, lat, lon in sampled}
+        if sum(v is not None for v in v35_risk.values()) >= 0.9 * len(sampled):
+            results = {}
+            for i, f in enumerate(features_list):
+                name = f.get('properties', {}).get(name_key, str(i))
+                sampled_idx = (i // step) * step
+                sampled_name = features_list[sampled_idx].get('properties', {}).get(name_key, str(sampled_idx)) if sampled_idx < len(features_list) else ""
+                results[name] = v35_risk.get(sampled_name) or {"risk_score": 0, "label": "Low"}
+            return {"zones": results, "zone_type": zone_type, "total": len(results), "model": "v3.5"}
 
     # Fetch live weather for all centroids in parallel.
     # If Open-Meteo rate-limits or stalls, keep whatever returned and fall through
@@ -600,6 +640,13 @@ _county_cache: dict = {"expires": 0.0, "data": None, "params": None}
 def _compute_county_risk(evi_ov=None, air_temp_encoded_ov=None, wind_ov=None,
                          humidity_ov=None, elev_ov=None, kbdi_ov=None) -> dict:
     """Heavy path for /risk-by-county. Honors per-feature overrides."""
+    overridden = any(v is not None for v in (evi_ov, air_temp_encoded_ov, wind_ov, humidity_ov, elev_ov, kbdi_ov))
+    grid = None if overridden else _v35_grid()  # researcher sliders are v3.4's six inputs
+    if grid:
+        v35_risk = {name: _v35_point(grid, lat, lon) for name, lat, lon in CA_COUNTY_CENTROIDS}
+        if sum(v is not None for v in v35_risk.values()) >= 0.9 * len(v35_risk):
+            return {"counties": {n: r or {"risk_score": 0, "label": "Low"} for n, r in v35_risk.items()},
+                    "overrides": {}, "model": "v3.5"}
     # Fetch live weather in parallel for all counties (skip if all weather fields are overridden).
     # Same timeout-safe pattern as risk-by-zone: never let a stalled Open-Meteo call 500 the route.
     need_live = air_temp_encoded_ov is None or wind_ov is None or humidity_ov is None
@@ -794,6 +841,62 @@ def risk_grid():
             },
         },
     })
+
+
+_V35_BUILD_LOCK = threading.Lock()
+
+
+@research_bp.route('/admin/build-v35-grid', methods=['POST'])
+def build_v35_grid():
+    """Build today's v3.5 grid (every CA land tile) in the background, then refresh the four zone
+    caches from it. Called by .github/workflows/v35-grid.yml; returns 202 at once (the build
+    takes minutes, beyond gunicorn's 90 s request timeout)."""
+    import hmac
+    if not hmac.compare_digest(request.headers.get('X-Internal-Token', ''), os.getenv('INTERNAL_CRON_TOKEN') or '\0'):
+        return jsonify({'error': 'invalid X-Internal-Token'}), 401
+    if not _V35_BUILD_LOCK.acquire(blocking=False):
+        return jsonify({'status': 'already running'}), 409
+    app_obj = current_app._get_current_object()
+
+    def _run():
+        try:
+            with app_obj.app_context():
+                from zoneinfo import ZoneInfo
+                from ml import v35
+                t0 = time.time()
+                today = datetime.now(ZoneInfo("America/Los_Angeles")).date()
+                grid = v35.build_grid(today, get_feature, _fetch_live_weather)
+                _save_cache_to_db(v35.GRID_KEY, grid)
+                _V35_MEM.update(grid=grid, loaded=time.time())
+                for key in ("zip-codes", "neighborhoods", "census-tracts"):
+                    data = _compute_zone_risk(key)
+                    if data is not None:
+                        _zone_risk_cache[key] = _build_cache_entry(data, time.time() + _GRID_CACHE_TTL)
+                        _save_cache_to_db(key, data)
+                data = _compute_county_risk()
+                _zone_risk_cache["counties"] = _build_cache_entry(data, time.time() + _GRID_CACHE_TTL)
+                _save_cache_to_db("counties", data)
+                logger.info("v3.5 grid built: %d tiles, inputs filled %.2f, %.0fs",
+                            len(grid["tiles"]), grid["inputs_filled_mean"], time.time() - t0)
+        except Exception as e:
+            logger.error("v3.5 grid build failed (v3.4 keeps serving): %s", e, exc_info=True)
+        finally:
+            _V35_BUILD_LOCK.release()
+
+    threading.Thread(target=_run, name="v35-grid", daemon=True).start()
+    return jsonify({'status': 'started'}), 202
+
+
+@research_bp.route('/admin/v35-status', methods=['GET'])
+def v35_status():
+    """Public health check: which model serves the map, grid date, tier spread (gate 12)."""
+    g = _v35_grid()
+    if not g:
+        return jsonify({'model': 'v3.4', 'v35_grid': None})
+    labels = [t["label"] for t in g["tiles"].values()]
+    return jsonify({'model': 'v3.5', 'date': g['date'], 'built_at': g['built_at'], 'tiles': len(labels),
+                    'inputs_filled_mean': g['inputs_filled_mean'],
+                    'tiers': {k: labels.count(k) for k in ("Low", "Moderate", "High", "Very High", "Extreme")}})
 
 
 @research_bp.route('/admin/prewarm-tiles', methods=['POST'])
