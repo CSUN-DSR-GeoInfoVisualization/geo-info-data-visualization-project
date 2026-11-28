@@ -53,30 +53,52 @@ def region_failures(p, y, lat, elevation):
     return out
 
 
-def beats_reference_failures(p, y, references, seed=0):
-    """The model must beat the best reference system by AUROC, and the bootstrap 5th
-    percentile of the gain must be above 0 (a gain noise could reverse is not a gain).
-    references: {name: scores where higher = riskier} on the same rows."""
-    p, y = np.asarray(p), np.asarray(y)
-    refs = {n: np.asarray(s, float) for n, s in references.items()}
-    ok = ~np.isnan(p)
-    for s in refs.values():
-        ok &= ~np.isnan(s)
-    if ok.sum() < 200 or not refs:
-        return ["reference comparison: too few rows with every reference"]
-    p, y = p[ok], y[ok]
-    refs = {n: s[ok] for n, s in refs.items()}
-    best = max(refs, key=lambda n: roc_auc_score(y, refs[n]))
-    rng, gains = np.random.default_rng(seed), []
-    for _ in range(BOOT):
-        i = rng.integers(0, len(y), len(y))
-        if len(np.unique(y[i])) == 2:
-            gains.append(roc_auc_score(y[i], p[i]) - roc_auc_score(y[i], refs[best][i]))
-    lo = float(np.percentile(gains, 5))
-    if lo <= 0:
-        return [f"does not reliably beat {best}: AUROC gain 5th percentile {lo:+.3f}"]
-    return []
+def _calibrated_reference(score, y, groups, k=5):
+    """A reference index as a probability, fairly: a one-input logistic fitted out of
+    fold (whole groups held out), so its Brier is comparable to the model's."""
+    from sklearn.linear_model import LogisticRegression
+    g = np.unique(np.asarray(groups).astype(str), return_inverse=True)[1] % k
+    p = np.full(len(y), np.nan)
+    for f in range(k):
+        tr, te = g != f, g == f
+        if te.any() and len(np.unique(y[tr])) == 2:
+            p[te] = LogisticRegression().fit(score[tr].reshape(-1, 1), y[tr]).predict_proba(score[te].reshape(-1, 1))[:, 1]
+    return p
 
+
+def beats_reference_failures(p, y, references, groups=None, seed=0):
+    """Gate 10 (Ido, 2026-11-27): beat EVERY reference system on AUROC and on Brier,
+    each gain above 0 at the bootstrap 5th percentile. references: {name: score,
+    higher = riskier}; each is calibrated out of fold before its Brier is compared."""
+    from sklearn.metrics import brier_score_loss
+    p, y = np.asarray(p, float), np.asarray(y)
+    groups = np.zeros(len(y)) if groups is None else np.asarray(groups)
+    out, rng = [], np.random.default_rng(seed)
+    if not references:
+        return ["reference comparison: no reference systems in this data"]
+    for name, sc in references.items():
+        sc = np.asarray(sc, float)
+        ok = ~np.isnan(p) & ~np.isnan(sc)
+        if ok.sum() < 200 or len(np.unique(y[ok])) < 2:
+            out.append(f"{name}: too few rows to compare")
+            continue
+        pp, yy, ss = p[ok], y[ok], sc[ok]
+        cal = _calibrated_reference(ss, yy, groups[ok])
+        m = ~np.isnan(cal)
+        da, db = [], []
+        for _ in range(BOOT):
+            i = rng.integers(0, len(yy), len(yy))
+            if len(np.unique(yy[i])) == 2:
+                da.append(roc_auc_score(yy[i], pp[i]) - roc_auc_score(yy[i], ss[i]))
+                j = i[m[i]]
+                if len(np.unique(yy[j])) == 2:
+                    db.append(brier_score_loss(yy[j], cal[j]) - brier_score_loss(yy[j], pp[j]))
+        lo_a, lo_b = float(np.percentile(da, 5)), float(np.percentile(db, 5)) if db else -1.0
+        if lo_a <= 0:
+            out.append(f"does not reliably beat {name} on AUROC (gain 5th pct {lo_a:+.3f})")
+        if lo_b <= 0:
+            out.append(f"does not reliably beat {name} on Brier (gain 5th pct {lo_b:+.4f})")
+    return out
 
 def missing_failures(df, cols, era_start=None):
     """An input blank on more than MAX_MISSING of the rows where it should exist.
@@ -129,4 +151,61 @@ def group_effects(model, scaler, X_ref, cols, cst, n=15):
                     z[:, i] = np.percentile(col, q if sg > 0 else 100 - q)
             risks.append(model.predict_proba(scaler.transform(z))[:, 1].mean())
         out[g] = round(float(max(risks) - min(risks)), 3)
+    return out
+
+
+def _skill(score, y, prob=None):
+    """Standard fire-danger / forecast verification measures for one score."""
+    from sklearn.metrics import average_precision_score, brier_score_loss, log_loss
+    score, y = np.asarray(score, float), np.asarray(y)
+    base = y.mean()
+    out = {"AUROC": roc_auc_score(y, score), "PR-AUC": average_precision_score(y, score)}
+    if prob is not None:
+        prob = np.clip(np.asarray(prob, float), 1e-6, 1 - 1e-6)
+        b = brier_score_loss(y, prob)
+        out.update({"Brier": b, "Brier skill": 1 - b / (base * (1 - base)), "log loss": log_loss(y, prob)})
+    for top in (0.20, 0.10, 0.03):  # alarm levels: the riskiest 20% / 10% / 3% of rows
+        cut = np.quantile(score, 1 - top)
+        alarm = score >= cut
+        hits, fa, miss = (alarm & (y == 1)).sum(), (alarm & (y == 0)).sum(), (~alarm & (y == 1)).sum()
+        cn = (~alarm & (y == 0)).sum()
+        n = len(y)
+        exp = ((hits + miss) * (hits + fa) + (cn + miss) * (cn + fa)) / n
+        out[f"fire capture top {int(top*100)}%"] = hits / max(hits + miss, 1)          # POD
+        if top == 0.10:
+            out["FAR top 10%"] = fa / max(hits + fa, 1)
+            out["CSI top 10%"] = hits / max(hits + fa + miss, 1)
+            out["Heidke top 10%"] = (hits + cn - exp) / max(n - exp, 1)
+            out["lift top 10%"] = (hits / max(hits + fa, 1)) / max(base, 1e-9)
+    return {k: round(float(v), 4) for k, v in out.items()}
+
+
+def scoreboard(p, y, references, groups=None):
+    """Every verification measure for the model and each reference system on the same
+    rows (references calibrated out of fold for the probability measures)."""
+    p, y = np.asarray(p, float), np.asarray(y)
+    groups = np.zeros(len(y)) if groups is None else np.asarray(groups)
+    board = {"FireScope": _skill(p, y, p)}
+    for name, sc in references.items():
+        sc = np.asarray(sc, float)
+        ok = ~np.isnan(sc) & ~np.isnan(p)
+        if ok.sum() >= 200 and len(np.unique(y[ok])) == 2:
+            cal = _calibrated_reference(sc[ok], y[ok], groups[ok])
+            m = ~np.isnan(cal)
+            board[name] = _skill(sc[ok][m], y[ok][m], cal[m])
+            board[name]["_FireScope_same_rows"] = _skill(p[ok][m], y[ok][m], p[ok][m])
+    return board
+
+
+def operational_failures(board):
+    """Gate 10b (2026-11-27): on the same rows as each reference, FireScope must capture
+    more fires in its riskiest 10% and have a higher CSI at that alarm level."""
+    out = []
+    for name, r in board.items():
+        if name == "FireScope":
+            continue
+        f = r["_FireScope_same_rows"]
+        for k in ("fire capture top 10%", "CSI top 10%"):
+            if f[k] <= r[k]:
+                out.append(f"{name}: {k} {f[k]:.3f} <= reference {r[k]:.3f}")
     return out

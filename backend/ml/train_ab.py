@@ -89,25 +89,83 @@ def model_a_rows(d, burnable_only=True):
     return pd.concat([f, same, sp])
 
 
+class StackedGroups:
+    """Sub-models (Ido, 2026-11-27): one monotonic model per factor group (wind, heat,
+    moisture, vegetation, terrain), combined by a logistic whose weights must stay
+    positive. Every group has a measurable weight, and every input is judged inside
+    its own group's model, so overlapping inputs no longer hide each other."""
+
+    def __init__(self, cols, cst):
+        self.cols, self.cst = cols, cst
+        self.groups = {g: [c for c in m if c in cols] for g, m in gates.INPUT_GROUPS.items()}
+        self.groups = {g: m for g, m in self.groups.items() if m}
+        for c in cols:
+            if not any(c in m for m in self.groups.values()):
+                self.groups[c] = [c]
+
+    def _score(self, models, X):
+        return np.column_stack([models[g][0].decision_function(models[g][1].transform(X[:, [self.cols.index(c) for c in m]]))
+                                for g, m in self.groups.items()])
+
+    def fit(self, X, y, grp, k=5):
+        from sklearn.linear_model import LogisticRegression
+        X, y = np.asarray(X, float), np.asarray(y)
+        fold = np.unique(np.asarray(grp).astype(str), return_inverse=True)[1] % k
+        fit_g = lambda Xg, yg, m: train_monotonic(Xg, yg, calibrate=False,
+                                                  monotonic_cst=[self.cst[self.cols.index(c)] for c in m])
+        oof = np.full((len(y), len(self.groups)), np.nan)
+        for f in range(k):
+            tr, te = fold != f, fold == f
+            if te.any():
+                ms = {g: fit_g(X[tr][:, [self.cols.index(c) for c in m]], y[tr], m) for g, m in self.groups.items()}
+                oof[te] = self._score(ms, X[te])
+        self.models = {g: fit_g(X[:, [self.cols.index(c) for c in m]], y, m) for g, m in self.groups.items()}
+        keep = list(range(len(self.groups)))
+        while True:  # positive weights only: a group the combiner would weigh negatively carries no weight
+            meta = LogisticRegression().fit(oof[:, keep], y)
+            neg = [keep[i] for i, w in enumerate(meta.coef_[0]) if w <= 0]
+            if not neg or len(keep) == 1:
+                break
+            keep = [i for i in keep if i not in neg]
+        self.keep, self.meta = keep, meta
+        names = list(self.groups)
+        sd = oof[:, keep].std(axis=0)
+        w = meta.coef_[0] * sd
+        self.weights = {names[i]: round(float(v / w.sum()), 3) for i, v in zip(keep, w)}
+        self.dropped = [names[i] for i in range(len(names)) if i not in keep]
+        return self
+
+    def predict_proba(self, X):
+        return self.meta.predict_proba(self._score(self.models, np.asarray(X, float))[:, self.keep])
+
+
+class _Identity:
+    def transform(self, X):
+        return np.asarray(X, float)
+
+
 def _metrics(y, p):
     return {"auroc": round(roc_auc_score(y, p), 3), "brier": round(brier_score_loss(y, p), 3), "n": int(len(y))}
 
 
-def _fit(d, label, cols, cst):
+def _fit(d, label, cols, cst, stacked=False):
     keep = [i for i, c in enumerate(cols) if d[c].notna().any()]
     cols, cst = [cols[i] for i in keep], [cst[i] for i in keep]
     assert not gates.leakage_failures(cols), gates.leakage_failures(cols)
+    if stacked:
+        m = StackedGroups(cols, cst).fit(d[cols].values, d[label].values, d["_grp"].values)
+        return m, _Identity(), cols
     m, s = train_monotonic(d[cols].values, d[label].values, monotonic_cst=cst,
                            groups=d["_grp"].values if "_grp" in d else None)
     return m, s, cols
 
 
-def _cv(d, label, group, cols, cst, k=5):
+def _cv(d, label, group, cols, cst, k=5, stacked=False):
     p = pd.Series(np.nan, index=d.index)
     g = pd.factorize(group)[0] % k
     for f in range(k):
         tr, te = g != f, g == f
-        m, s, c = _fit(d[tr], label, cols, cst)
+        m, s, c = _fit(d[tr], label, cols, cst, stacked)
         p[te] = m.predict_proba(s.transform(d.loc[te, c].values))[:, 1]
     return p
 
@@ -130,7 +188,9 @@ def input_effects(d, label, cols, cst):
 def _refs(d):
     return {n: sgn * _num(d, c).values for n, c, sgn in
             (("USFS ERC", "bench_erc", 1), ("USFS Burning Index", "bench_bi", 1),
-             ("100h fuel moisture", "gridmet_fm100", -1), ("1000h fuel moisture", "gridmet_fm1000", -1)) if c in d}
+             ("100h fuel moisture", "gridmet_fm100", -1), ("1000h fuel moisture", "gridmet_fm1000", -1),
+             ("Fosberg FFWI", "bench_ffwi", 1), ("Hot-Dry-Windy", "bench_hdw", 1),
+             ("NWS Red Flag Warning", "bench_rfw", 1)) if c in d and _num(d, c).notna().any()}
 
 
 def _report(d, p, label, cols):
@@ -140,11 +200,12 @@ def _report(d, p, label, cols):
         ok = ~np.isnan(sc)
         if ok.sum() > 200 and len(np.unique(y[ok])) == 2:
             ref_auroc[n] = round(roc_auc_score(y[ok], sc[ok]), 3)
-    fails = (gates.calibration_failures(p.values, y)
+    board = gates.scoreboard(p.values, y, _refs(d), d["_grp"].values if "_grp" in d else None)
+    fails = (gates.operational_failures(board) + gates.calibration_failures(p.values, y)
              + gates.region_failures(p.values, y, d["lat"].values, pd.to_numeric(d["elevation"]).values)
-             + gates.beats_reference_failures(p.values, y, _refs(d))
+             + gates.beats_reference_failures(p.values, y, _refs(d), d["_grp"].values if "_grp" in d else None)
              + tier_failures(tier_report(p.values, y)))
-    return {**_metrics(y, p), "references": ref_auroc, "failures": fails}
+    return {**_metrics(y, p), "references": ref_auroc, "scoreboard": board, "failures": fails}
 
 
 def evaluate_a(d, burnable_only=True):
@@ -158,20 +219,24 @@ def evaluate_a(d, burnable_only=True):
     place = (dev["lat"] // 1).astype(int).astype(str) + "," + (dev["lon"] // 1).astype(int).astype(str)
     out = {"rows": {"dev": int(len(dev)), "locked test": int(len(test)),
                     "confirmed fires": int(a["fire"].sum()), "controls": int((a["fire"] == 0).sum())}}
-    for name, cols, cst in (("base 6", FEATURE_COLS, CST[:6]), ("all inputs", COLS, CST)):
+    for name, cols, cst, stk in (("base 6", FEATURE_COLS, CST[:6], False), ("all inputs", COLS, CST, False),
+                                 ("stacked groups", COLS, CST, True)):
         r = {}
         for split, grp in (("held-out years", pair_year[~locked] // 5), ("held-out places", place)):
-            r[split] = _report(dev, _cv(dev, "fire", grp, cols, cst), "fire", cols)
+            r[split] = _report(dev, _cv(dev, "fire", grp, cols, cst, stacked=stk), "fire", cols)
         r["dead inputs"] = gates.missing_failures(dev, [c for c in cols if c not in ERA]) + \
             gates.missing_failures(dev, [c for c in cols if c in ERA], ERA)
         eff = input_effects(dev, "fire", cols, cst)
         r["input effects (each alone)"] = eff
-        m_, s_, c_ = _fit(dev, "fire", cols, cst)
+        m_, s_, c_ = _fit(dev, "fire", cols, cst, stk)
         geff = gates.group_effects(m_, s_, dev[c_].sample(min(400, len(dev)), random_state=0).values, c_,
                                    [cst[cols.index(c)] for c in c_])
         r["group effects (gate 5)"] = geff
         r["weak groups (< %s)" % MIN_INPUT_EFFECT] = [g for g, e in geff.items() if e < MIN_INPUT_EFFECT]
-        m, s, c = _fit(dev, "fire", cols, cst)
+        if stk:
+            r["group weights in the combiner"] = m_.weights
+            r["groups with no weight (gate 5 fail)"] = m_.dropped
+        m, s, c = m_, s_, c_
         r["LOCKED TEST"] = _report(test, pd.Series(m.predict_proba(s.transform(test[c].values))[:, 1], index=test.index),
                                    "fire", c)
         out[name] = r

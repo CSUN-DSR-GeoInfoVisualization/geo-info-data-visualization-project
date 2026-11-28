@@ -309,7 +309,8 @@ def merge(args):
     from routes import ml_ingest as mi
     raw, events = {}, {}
     from ml.fire_danger import DANGER_COLS, BENCH_COLS, NORMAL_COLS, SOIL_COLS
-    extra_cols = DANGER_COLS + BENCH_COLS + NORMAL_COLS + SOIL_COLS
+    from ml.fire_danger import BENCH2_COLS
+    extra_cols = DANGER_COLS + BENCH_COLS + BENCH2_COLS + NORMAL_COLS + SOIL_COLS
     for p in getattr(args, "danger", None) or []:  # extra-column files (fire-danger, normals, soil): additive
         with open(p, newline="") as f:
             for r in csv.DictReader(f):
@@ -353,7 +354,8 @@ def merge(args):
             raise SystemExit(f"refusing {_key(r)}: {r['n_weather_sources']} weather source(s)")
     rows.sort(key=lambda r: (r["acq_date"], r["lat"], r["lon"], r["fire"]))
     with open(args.out, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=mi.WEATHERAPP_COLS + BENCH_COLS + ["pair_of"], extrasaction="ignore")
+        w = csv.DictWriter(f, fieldnames=mi.WEATHERAPP_COLS + BENCH_COLS + BENCH2_COLS + ["pair_of", "label_class",
+                           "fpa_cause", "fpa_size_acres", "nlcd_class", "burnable"], extrasaction="ignore")
         w.writeheader()
         w.writerows(rows)
     no_raw = sum(not any(r.get(c) for c in mi.RAW_WEATHER_COLS) for r in rows)
@@ -651,7 +653,8 @@ def batch_columns(args):
     from ml import fire_danger as fd
     fn, cols, group = {"normals": (lambda g, pts: fd.normals_at(int(g), pts), fd.NORMAL_COLS, lambda r: r["acq_date"][5:7]),
                        "soil": (fd.soil_at, fd.SOIL_COLS[:3], lambda r: r["acq_date"]),
-                       "gldas": (fd.gldas_at, fd.GLDAS_COLS, lambda r: r["acq_date"])}[args.kind]
+                       "gldas": (fd.gldas_at, fd.GLDAS_COLS, lambda r: r["acq_date"]),
+                       "bench": (fd.bench_at, fd.BENCH2_COLS, lambda r: r["acq_date"])}[args.kind]
     with open(args.inp, newline="") as f:
         rows = list(csv.DictReader(f))
     done = set()
@@ -887,7 +890,7 @@ if __name__ == "__main__":
     q.add_argument("--out", required=True)
     q.add_argument("--part", default="0/1")
     r_ = sub.add_parser("batch")
-    r_.add_argument("--kind", choices=["normals", "soil", "gldas"], required=True)
+    r_.add_argument("--kind", choices=["normals", "soil", "gldas", "bench"], required=True)
     r_.add_argument("--inp", required=True)
     r_.add_argument("--out", required=True)
     lc = sub.add_parser("label-class")
