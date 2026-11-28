@@ -177,7 +177,8 @@ interface UnifiedOverlayProps {
 }
 
 // 5-tier shared palette — lib/riskTiers.ts
-import { riskRgba as getRiskColor } from "../lib/riskTiers";
+import { riskRgba as getRiskColor, tierForScore } from "../lib/riskTiers";
+import { ZoneV35Details } from "./ZoneV35Details";
 
 function UnifiedResearchOverlay({ features, zoneGeoJson, zoneRiskData, zoneNameKey, onZoneClick, nifcPerimeters, showPerimeters, onPerimeterClick, shelters = [], showShelters = false, onShelterClick }: UnifiedOverlayProps) {
   const map = useMap();
@@ -1045,9 +1046,7 @@ function ResearchMapView() {
                           <div
                             className="w-3 h-3 rounded-full shrink-0"
                             style={{
-                              backgroundColor: selectedZoneRisk.risk_score >= 0.66 ? "#dc2626"
-                                : selectedZoneRisk.risk_score >= 0.33 ? "#eab308"
-                                : "#22c55e",
+                              backgroundColor: tierForScore(selectedZoneRisk.risk_score).hex,
                             }}
                           />
                           <div className="font-bold text-sm">{selectedZone}</div>
@@ -1056,6 +1055,12 @@ function ResearchMapView() {
                           {Math.round(selectedZoneRisk.risk_score * 100)}% Risk
                           <span className="text-[10px] font-normal text-muted-foreground ml-1">({selectedZoneRisk.label})</span>
                         </div>
+                        {(zoneRiskData as any)?.[selectedZone]?.model === "v3.5" && (
+                          <div className="mt-3">
+                            <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">Live forecast (v3.5, no overrides)</div>
+                            <ZoneV35Details zone={(zoneRiskData as any)[selectedZone]} />
+                          </div>
+                        )}
                       </div>
                     )}
 

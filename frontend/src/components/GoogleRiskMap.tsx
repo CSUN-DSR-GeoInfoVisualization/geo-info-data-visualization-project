@@ -7,6 +7,7 @@ import { CountyRiskOverlay } from './CountyRiskOverlay';
 import { ZipCodeRiskOverlay } from './ZipCodeRiskOverlay';
 import { CensusTractRiskOverlay } from './CensusTractRiskOverlay';
 import { NeighborhoodRiskOverlay } from './NeighborhoodRiskOverlay';
+import { ZoneV35Details, v35Headline, type V35Zone } from "./ZoneV35Details";
 
 interface SavedLocation { id: number; name: string; lat: number; lon: number; }
 
@@ -223,7 +224,7 @@ interface GoogleRiskMapProps {
 
 type ZoneLevel = "counties" | "zip-codes" | "census-tracts" | "neighborhoods";
 
-interface SelectedZone {
+interface SelectedZone extends V35Zone {
   name: string;
   risk_score: number;
   label: string;
@@ -302,28 +303,28 @@ export function GoogleRiskMap({
           {zoneLevel === "counties" && (
             <CountyRiskOverlay
               onCountyClick={(name, risk) =>
-                setSelectedZone({ name, risk_score: risk.risk_score, label: risk.label, features: risk.features, level: "County" })
+                setSelectedZone({ ...risk, name, level: "County" })
               }
             />
           )}
           {zoneLevel === "zip-codes" && (
             <ZipCodeRiskOverlay
               onZoneClick={(name, risk) =>
-                setSelectedZone({ name, risk_score: risk.risk_score, label: risk.label, features: risk.features, level: "ZIP Code" })
+                setSelectedZone({ ...risk, name, level: "ZIP Code" })
               }
             />
           )}
           {zoneLevel === "census-tracts" && (
             <CensusTractRiskOverlay
               onZoneClick={(name, risk) =>
-                setSelectedZone({ name, risk_score: risk.risk_score, label: risk.label, features: risk.features, level: "Census Tract" })
+                setSelectedZone({ ...risk, name, level: "Census Tract" })
               }
             />
           )}
           {zoneLevel === "neighborhoods" && (
             <NeighborhoodRiskOverlay
               onZoneClick={(name, risk) =>
-                setSelectedZone({ name, risk_score: risk.risk_score, label: risk.label, features: risk.features, level: "Neighborhood" })
+                setSelectedZone({ ...risk, name, level: "Neighborhood" })
               }
             />
           )}
@@ -343,6 +344,8 @@ export function GoogleRiskMap({
               padding: 14,
               minWidth: 260,
               maxWidth: 340,
+              maxHeight: '75vh',
+              overflowY: 'auto',
               boxShadow: '0 10px 15px -3px rgba(0,0,0,0.1), 0 4px 6px -4px rgba(0,0,0,0.05)',
               fontSize: 12,
               lineHeight: 1.55,
@@ -361,7 +364,7 @@ export function GoogleRiskMap({
               <span style={{ background: labelColor(selectedZone.label), color: 'white', padding: '2px 8px', borderRadius: 999, fontSize: 11, fontWeight: 600 }}>
                 {selectedZone.label}
               </span>
-              <span style={{ color: '#374151', fontWeight: 600 }}>{(selectedZone.risk_score * 100).toFixed(0)}% risk</span>
+              <span style={{ color: '#374151', fontWeight: 600 }}>{v35Headline(selectedZone) ?? `${(selectedZone.risk_score * 100).toFixed(0)}% risk`}</span>
               {selectedZone.data_quality === 'default' && (
                 <span title="Some features fell back to interpolated defaults; cache is warming" style={{ background: '#fef3c7', color: '#92400e', padding: '2px 6px', borderRadius: 6, fontSize: 10, fontWeight: 600 }}>approx</span>
               )}
@@ -395,7 +398,11 @@ export function GoogleRiskMap({
                     <span style={{ fontVariantNumeric: 'tabular-nums' }}>{selectedZone.features.kbdi?.toFixed(0) ?? '—'}</span>
                   </div>
                 </div>
-                <div style={{ marginTop: 8, fontSize: 10, color: '#9ca3af' }}>Monotonic gradient-boosted model (isotonic-calibrated) · MODIS EVI + Open-Meteo + USGS 3DEP + NASA POWER (KBDI).</div>
+                {selectedZone.model === 'v3.5' ? (
+                  <div style={{ marginTop: 12 }}><ZoneV35Details zone={selectedZone} /></div>
+                ) : (
+                  <div style={{ marginTop: 8, fontSize: 10, color: '#9ca3af' }}>Monotonic gradient-boosted model (isotonic-calibrated) · MODIS EVI + Open-Meteo + USGS 3DEP + NASA POWER (KBDI).</div>
+                )}
               </>
             ) : (
               <div style={{ fontSize: 11, color: '#6b7280' }}>Parameter breakdown loading…</div>
