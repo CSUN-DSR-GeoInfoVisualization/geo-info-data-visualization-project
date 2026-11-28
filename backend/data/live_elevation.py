@@ -81,6 +81,7 @@ def get_elevation(lat: float, lon: float) -> float:
     if cached is not None:
         return float(cached.elevation_m)
 
+    db.session.commit()  # release the pool connection before the slow network call
     elev = _fetch_usgs(lat, lon)
     source = "usgs_3dep"
     if elev is None:
