@@ -199,7 +199,7 @@ def _refs(d):
              ("NWS Red Flag Warning", "bench_rfw", 1)) if c in d and _num(d, c).notna().any()}
 
 
-def _report(d, p, label, cols, ref_train=None, w=None):
+def _report(d, p, label, cols, ref_train=None, w=None, w_train=None):
     """ref_train: (training rows, label) to calibrate the reference systems on, as the model was.
     w: explicit per-row design weights (overrides the training-share reweighting)."""
     y = d[label].values
@@ -208,7 +208,7 @@ def _report(d, p, label, cols, ref_train=None, w=None):
         ok = ~np.isnan(sc)
         if ok.sum() > 200 and len(np.unique(y[ok])) == 2:
             ref_auroc[n] = round(roc_auc_score(y[ok], sc[ok]), 3)
-    rp = gates.fit_reference_probs(_refs(ref_train[0]), ref_train[0][ref_train[1]].values, _refs(d)) if ref_train else None
+    rp = gates.fit_reference_probs(_refs(ref_train[0]), ref_train[0][ref_train[1]].values, _refs(d), w_train) if ref_train else None
     share = float(ref_train[0][ref_train[1]].mean()) if ref_train else None  # judge under the training design
     share = w if w is not None else share
     board = gates.scoreboard(p.values, y, _refs(d), d["_grp"].values if "_grp" in d else None, rp, share)
@@ -384,7 +384,7 @@ def evaluate_combined(d, g):
     for name, part in (("dev (in-sample for A, B trained without locked)", dev), ("LOCKED TEST", test)):
         p = pd.Series(comb.predict_proba(part[cols].values)[:, 1], index=part.index)
         out[name] = _report(part, p, "large_start", cols, ref_train=(dev, "large_start") if part is test else None,
-                            w=_population_weights(part))
+                            w=_population_weights(part), w_train=w_dev)
     # root-cause diagnostic (2026-11-28): which part loses ranking on the large-start target?
     from sklearn.metrics import roc_auc_score
     ya = test["large_start"].values
