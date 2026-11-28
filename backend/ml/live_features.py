@@ -77,10 +77,13 @@ def forecast_cells(cells, date_str, per_request=20):
         chunk = cells[c0:c0 + per_request]
         for attempt in range(4):
             try:
+                t = dt.date.fromisoformat(date_str)
+                # explicit window ending on date_str: past_days counts back from TODAY, which made every
+                # historical request miss its 90-day spin-up (2026-11-28 bug: empty correction fit)
                 r = requests.get(FORECAST, params={
                     "latitude": ",".join(str(c[0]) for c in chunk), "longitude": ",".join(str(c[1]) for c in chunk),
-                    "daily": DAILY, "past_days": 89, "forecast_days": 1, "wind_speed_unit": "ms",
-                    "timezone": "America/Los_Angeles"}, timeout=90)
+                    "daily": DAILY, "start_date": str(t - dt.timedelta(days=89)), "end_date": date_str,
+                    "wind_speed_unit": "ms", "timezone": "America/Los_Angeles"}, timeout=90)
                 r.raise_for_status()
                 break
             except requests.RequestException:
