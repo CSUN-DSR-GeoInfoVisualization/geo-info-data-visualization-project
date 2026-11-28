@@ -130,6 +130,7 @@ def get_evi_live(lat: float, lon: float) -> float:
     if cached is not None and cached.composite_date >= cutoff:
         return float(cached.evi)
 
+    db.session.commit()  # release the pool connection before the slow network call
     scaled, composite_date = _evi_composite(lat, lon, today, newest_valid=True)
     try:
         db.session.merge(FeatureCacheEvi(
