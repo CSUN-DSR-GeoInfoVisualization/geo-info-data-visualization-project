@@ -208,11 +208,12 @@ def _report(d, p, label, cols, ref_train=None):
         if ok.sum() > 200 and len(np.unique(y[ok])) == 2:
             ref_auroc[n] = round(roc_auc_score(y[ok], sc[ok]), 3)
     rp = gates.fit_reference_probs(_refs(ref_train[0]), ref_train[0][ref_train[1]].values, _refs(d)) if ref_train else None
-    board = gates.scoreboard(p.values, y, _refs(d), d["_grp"].values if "_grp" in d else None, rp)
-    fails = (gates.operational_failures(board) + gates.calibration_failures(p.values, y)
+    share = float(ref_train[0][ref_train[1]].mean()) if ref_train else None  # judge under the training design
+    board = gates.scoreboard(p.values, y, _refs(d), d["_grp"].values if "_grp" in d else None, rp, share)
+    fails = (gates.operational_failures(board) + gates.calibration_failures(p.values, y, w=gates.design_weights(y, share))
              + gates.region_failures(p.values, y, d["lat"].values, pd.to_numeric(d["elevation"]).values)
              + gates.beats_reference_failures(p.values, y, _refs(d), d["_grp"].values if "_grp" in d else None,
-                                              ref_probs=rp)
+                                              ref_probs=rp, target_share=share)
              + tier_failures(tier_report(p.values, y)))
     return {**_metrics(y, p), "references": ref_auroc, "scoreboard": board, "failures": fails}
 
