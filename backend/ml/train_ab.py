@@ -199,17 +199,20 @@ def _refs(d):
              ("NWS Red Flag Warning", "bench_rfw", 1)) if c in d and _num(d, c).notna().any()}
 
 
-def _report(d, p, label, cols):
+def _report(d, p, label, cols, ref_train=None):
+    """ref_train: (training rows, label) to calibrate the reference systems on, as the model was."""
     y = d[label].values
     ref_auroc = {}
     for n, sc in _refs(d).items():
         ok = ~np.isnan(sc)
         if ok.sum() > 200 and len(np.unique(y[ok])) == 2:
             ref_auroc[n] = round(roc_auc_score(y[ok], sc[ok]), 3)
-    board = gates.scoreboard(p.values, y, _refs(d), d["_grp"].values if "_grp" in d else None)
+    rp = gates.fit_reference_probs(_refs(ref_train[0]), ref_train[0][ref_train[1]].values, _refs(d)) if ref_train else None
+    board = gates.scoreboard(p.values, y, _refs(d), d["_grp"].values if "_grp" in d else None, rp)
     fails = (gates.operational_failures(board) + gates.calibration_failures(p.values, y)
              + gates.region_failures(p.values, y, d["lat"].values, pd.to_numeric(d["elevation"]).values)
-             + gates.beats_reference_failures(p.values, y, _refs(d), d["_grp"].values if "_grp" in d else None)
+             + gates.beats_reference_failures(p.values, y, _refs(d), d["_grp"].values if "_grp" in d else None,
+                                              ref_probs=rp)
              + tier_failures(tier_report(p.values, y)))
     return {**_metrics(y, p), "references": ref_auroc, "scoreboard": board, "failures": fails}
 
@@ -244,7 +247,7 @@ def evaluate_a(d, burnable_only=True):
             r["groups with no weight (gate 5 fail)"] = m_.dropped
         m, s, c = m_, s_, c_
         r["LOCKED TEST"] = _report(test, pd.Series(m.predict_proba(s.transform(test[c].values))[:, 1], index=test.index),
-                                   "fire", c)
+                                   "fire", c, ref_train=(dev, "fire"))
         out[name] = r
     return out
 
@@ -268,7 +271,7 @@ def evaluate_b(g, d):
         r["group effects (gate 5)"] = gates.group_effects(m, s, dev[c].sample(min(400, len(dev)), random_state=0).values, c,
                                                           [cst[cols.index(x)] for x in c])
         r["LOCKED TEST"] = _report(test, pd.Series(m.predict_proba(s.transform(test[c].values))[:, 1], index=test.index),
-                                   "large", c)
+                                   "large", c, ref_train=(dev, "large"))
         out[name] = r
     return out
 
@@ -326,7 +329,7 @@ def evaluate_combined(d, g):
     out = {"rows": {"dev": int(len(dev)), "locked test": int(len(test)), "large starts (locked)": int(test["large_start"].sum())}}
     for name, part in (("dev (in-sample for A, B trained without locked)", dev), ("LOCKED TEST", test)):
         p = pd.Series(comb.predict_proba(part[cols].values)[:, 1], index=part.index)
-        out[name] = _report(part, p, "large_start", cols)
+        out[name] = _report(part, p, "large_start", cols, ref_train=(dev, "large_start") if part is test else None)
     out["group effects on A x B (gate 5)"] = gates.group_effects(
         comb, _Identity(), dev[cols].sample(min(400, len(dev)), random_state=0).values, cols,
         [CST[COLS.index(c)] for c in cols])

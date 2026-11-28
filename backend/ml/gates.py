@@ -66,7 +66,7 @@ def _calibrated_reference(score, y, groups, k=5):
     return p
 
 
-def beats_reference_failures(p, y, references, groups=None, seed=0):
+def beats_reference_failures(p, y, references, groups=None, seed=0, ref_probs=None):
     """Gate 10 (Ido, 2026-11-27): beat EVERY reference system on AUROC and on Brier,
     each gain above 0 at the bootstrap 5th percentile. references: {name: score,
     higher = riskier}; each is calibrated out of fold before its Brier is compared."""
@@ -83,7 +83,11 @@ def beats_reference_failures(p, y, references, groups=None, seed=0):
             out.append(f"{name}: too few rows to compare")
             continue
         pp, yy, ss = p[ok], y[ok], sc[ok]
-        cal = _calibrated_reference(ss, yy, groups[ok])
+        # Same treatment as the model: if the caller supplies reference probabilities fitted on
+        # the training rows (ref_probs), use them; calibrating on the test rows themselves would
+        # tune the reference to the test's own base rate (2026-11-27 fairness fix).
+        cal = (np.asarray(ref_probs[name], float)[ok] if ref_probs and name in ref_probs
+               else _calibrated_reference(ss, yy, groups[ok]))
         m = ~np.isnan(cal)
         da, db = [], []
         for _ in range(BOOT):
@@ -180,7 +184,7 @@ def _skill(score, y, prob=None):
     return {k: round(float(v), 4) for k, v in out.items()}
 
 
-def scoreboard(p, y, references, groups=None):
+def scoreboard(p, y, references, groups=None, ref_probs=None):
     """Every verification measure for the model and each reference system on the same
     rows (references calibrated out of fold for the probability measures)."""
     p, y = np.asarray(p, float), np.asarray(y)
@@ -190,7 +194,8 @@ def scoreboard(p, y, references, groups=None):
         sc = np.asarray(sc, float)
         ok = ~np.isnan(sc) & ~np.isnan(p)
         if ok.sum() >= 200 and len(np.unique(y[ok])) == 2:
-            cal = _calibrated_reference(sc[ok], y[ok], groups[ok])
+            cal = (np.asarray(ref_probs[name], float)[ok] if ref_probs and name in ref_probs
+                   else _calibrated_reference(sc[ok], y[ok], groups[ok]))
             m = ~np.isnan(cal)
             board[name] = _skill(sc[ok][m], y[ok][m], cal[m])
             board[name]["_FireScope_same_rows"] = _skill(p[ok][m], y[ok][m], p[ok][m])
@@ -208,4 +213,22 @@ def operational_failures(board):
         for k in ("fire capture top 10%", "CSI top 10%"):
             if f[k] <= r[k]:
                 out.append(f"{name}: {k} {f[k]:.3f} <= reference {r[k]:.3f}")
+    return out
+
+
+def fit_reference_probs(train_refs, train_y, test_refs):
+    """Reference systems calibrated on the TRAINING rows (one-input logistic each) and
+    applied to the test rows: the same data the model's own calibration saw."""
+    from sklearn.linear_model import LogisticRegression
+    out = {}
+    for name, sc in train_refs.items():
+        sc, y = np.asarray(sc, float), np.asarray(train_y)
+        ok = ~np.isnan(sc)
+        if ok.sum() >= 200 and len(np.unique(y[ok])) == 2 and name in test_refs:
+            lr = LogisticRegression().fit(sc[ok].reshape(-1, 1), y[ok])
+            t = np.asarray(test_refs[name], float)
+            pr = np.full(len(t), np.nan)
+            tok = ~np.isnan(t)
+            pr[tok] = lr.predict_proba(t[tok].reshape(-1, 1))[:, 1]
+            out[name] = pr
     return out
