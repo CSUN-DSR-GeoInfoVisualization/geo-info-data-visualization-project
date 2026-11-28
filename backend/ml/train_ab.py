@@ -96,7 +96,8 @@ def _fit(d, label, cols, cst):
     keep = [i for i, c in enumerate(cols) if d[c].notna().any()]
     cols, cst = [cols[i] for i in keep], [cst[i] for i in keep]
     assert not gates.leakage_failures(cols), gates.leakage_failures(cols)
-    m, s = train_monotonic(d[cols].values, d[label].values, monotonic_cst=cst)
+    m, s = train_monotonic(d[cols].values, d[label].values, monotonic_cst=cst,
+                           groups=d["_grp"].values if "_grp" in d else None)
     return m, s, cols
 
 
@@ -151,6 +152,7 @@ def evaluate_a(d, burnable_only=True):
     pair_year = np.where(a["control_type"].eq("same_place"), year + 1, year)
     region = gates.region_of(a["lat"].values, pd.to_numeric(a["elevation"]).values)
     locked = np.isin(pair_year, LOCKED_YEARS) | (region == LOCKED_REGION)
+    a["_grp"] = pair_year // 5  # calibration folds hold out whole year blocks
     dev, test = a[~locked], a[locked]
     place = (dev["lat"] // 1).astype(int).astype(str) + "," + (dev["lon"] // 1).astype(int).astype(str)
     out = {"rows": {"dev": int(len(dev)), "locked test": int(len(test)),
