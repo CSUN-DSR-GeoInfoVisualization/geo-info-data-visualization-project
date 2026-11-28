@@ -72,7 +72,8 @@ def danger_sources(lat, lon, date_str):
         logger.warning("gridMET fire-danger failed @ %.3f,%.3f %s: %s", lat, lon, date_str, e)
     out.update(era5_fuel(lat, lon, date_str))  # RateLimited propagates
     for name, fn in (("normals", lambda: normals_at(int(date_str[5:7]), [("p", lat, lon)])),
-                     ("soil", lambda: soil_at(date_str, [("p", lat, lon)]))):
+                     ("soil", lambda: soil_at(date_str, [("p", lat, lon)])),
+                     ("gldas", lambda: gldas_at(date_str, [("p", lat, lon)]))):
         try:
             out.update(fn().get("p", {}))
         except Exception as e:  # logged to the failure digest; other columns still land
@@ -83,7 +84,10 @@ def danger_sources(lat, lon, date_str):
 # Temperature vs normal (B4): monthly 1991-2020 normals from two sources.
 NORMAL_COLS = ["era5l_tnorm", "era5l_rhnorm", "prism_tnorm", "prism_rhnorm"]
 # Soil moisture (B1): ERA5-Land layers 1-2 (2001+) and SMAP L4 surface (2015-04+).
-SOIL_COLS = ["era5l_sm1", "era5l_sm2", "smap_sm"]
+SOIL_COLS = ["era5l_sm1", "era5l_sm2", "smap_sm", "gldas_sm"]
+# G-SM gap fill (Data Coverage plan): NASA GLDAS-2.1 Noah 0-10 cm, 2000-01+, the second
+# soil source for 2001-2015 before SMAP. kg/m2 over 10 cm / 100 = volumetric m3/m3.
+GLDAS_COLS = ["gldas_sm"]
 
 
 def _rh(t, td):
@@ -118,6 +122,16 @@ def normals_at(month, points):
             r.update(prism_tnorm=round(p["tmean"], 3), prism_rhnorm=round(_rh(p["tmean"], p["tdmean"]), 2))
         out[k] = r
     return out
+
+
+def gldas_at(date_str, points):
+    ee = _ee()
+    nxt = str(dt.date.fromisoformat(date_str) + dt.timedelta(days=1))
+    img = (ee.ImageCollection("NASA/GLDAS/V021/NOAH/G025/T3H").filterDate(date_str, nxt)
+           .select("SoilMoi0_10cm_inst").mean())
+    res = _reduce(img, points, 27830)
+    return {str(k): ({"gldas_sm": round(res[str(k)]["SoilMoi0_10cm_inst"] / 100, 4)}
+                     if res.get(str(k), {}).get("SoilMoi0_10cm_inst") is not None else {}) for k, _, _ in points}
 
 
 def soil_at(date_str, points):

@@ -37,7 +37,7 @@ COLS = FEATURE_COLS + list(EVENT_KEYS) + NEW
 # +1 risk never falls as the input rises, -1 never rises, 0 free
 CST = ([0, 1, 1, -1, 0, 1] + [1, 1, -1, 1, -1]      # base six; gust, offshore, rh_min, vpd_max, rain_7d
        + [-1, -1, 1, -1, -1, 0, 0])                # fm100, fm1000, temp_anom, rh_anom, soil, slope, southness
-ERA = {"gust_event": GUST_PAIRS_FROM, "soil": SOIL_FROM}
+ERA = {"gust_event": GUST_PAIRS_FROM}  # soil has 2 sources from 2001 with GLDAS (G-SM)
 
 
 def _num(d, c):
@@ -67,8 +67,9 @@ def build_inputs(d, weights=None):
     t = _num(d, "air_temp_encoded") * 0.02 - 273.15
     d["temp_anom"] = t - _blend(d, ["era5l_tnorm", "prism_tnorm"])
     d["rh_anom"] = _num(d, "humidity") - _blend(d, ["era5l_rhnorm", "prism_rhnorm"])
-    d["soil"] = _blend(d, ["era5l_sm1", "smap_sm"])
-    d.loc[pair_day < SOIL_FROM, "soil"] = np.nan
+    d["soil"] = _blend(d, ["era5l_sm1", "smap_sm", "gldas_sm"])  # GLDAS gives 2 sources from 2001 (G-SM)
+    if "gldas_sm" not in d:
+        d.loc[pair_day < SOIL_FROM, "soil"] = np.nan
     d["slope"] = _num(d, "slope")
     d["southness"] = -np.cos(np.radians(_num(d, "aspect")))  # +1 south-facing (sunnier, drier)
     return d
