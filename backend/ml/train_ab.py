@@ -277,14 +277,19 @@ class _Combined:
     """Live risk = P_A(start) x P_B(large | start), Architecture v2. Both models read the
     same column list, so group effects sweep an input through both at once."""
 
-    def __init__(self, ma, sa, ca, mb, sb, cb, cols):
-        self.a, self.b, self.cols = (ma, sa, ca), (mb, sb, cb), cols
+    def __init__(self, ma, sa, ca, mb, sb, cb, cols, cal=None):
+        self.a, self.b, self.cols, self.cal = (ma, sa, ca), (mb, sb, cb), cols, cal
 
-    def predict_proba(self, X):
+    def raw(self, X):
         X = pd.DataFrame(np.asarray(X, float), columns=self.cols)
         pa = self.a[0].predict_proba(self.a[1].transform(X[self.a[2]].values))[:, 1]
         pb = self.b[0].predict_proba(self.b[1].transform(X[self.b[2]].values))[:, 1]
-        p = pa * pb
+        return pa * pb
+
+    def predict_proba(self, X):
+        p = self.raw(X)
+        if self.cal is not None:  # monotonic in the product, so ranking is unchanged
+            p = self.cal.predict_proba(np.log(np.clip(p, 1e-6, 1)).reshape(-1, 1))[:, 1]
         return np.c_[1 - p, p]
 
 
@@ -308,7 +313,16 @@ def evaluate_combined(d, g):
     ma, sa, ca = _fit(dev, "fire", COLS, CST)
     mb, sb, cb = _fit(b_dev, "large", COLS, CST)
     cols = sorted(set(ca) | set(cb), key=COLS.index)
-    comb = _Combined(ma, sa, ca, mb, sb, cb, cols)
+    # Calibration layer (root-cause fix 2026-11-27: the raw product P_A x P_B answers no single
+    # question, Brier 0.247 vs ERC 0.208): out-of-fold P_A on dev (year blocks) times P_B, then
+    # a logistic on log(product) for the large-start target. Monotonic, so ranking is unchanged.
+    from sklearn.linear_model import LogisticRegression
+    pa_oof = _cv(dev, "fire", dev["_grp"], COLS, CST)
+    pb_dev = mb.predict_proba(sb.transform(dev[cb].values))[:, 1]
+    ok = pa_oof.notna().values
+    cal = LogisticRegression().fit(np.log(np.clip(pa_oof.values[ok] * pb_dev[ok], 1e-6, 1)).reshape(-1, 1),
+                                   dev["large_start"].values[ok])
+    comb = _Combined(ma, sa, ca, mb, sb, cb, cols, cal)
     out = {"rows": {"dev": int(len(dev)), "locked test": int(len(test)), "large starts (locked)": int(test["large_start"].sum())}}
     for name, part in (("dev (in-sample for A, B trained without locked)", dev), ("LOCKED TEST", test)):
         p = pd.Series(comb.predict_proba(part[cols].values)[:, 1], index=part.index)
