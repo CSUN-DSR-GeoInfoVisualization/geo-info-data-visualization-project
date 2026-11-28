@@ -199,8 +199,9 @@ def _refs(d):
              ("NWS Red Flag Warning", "bench_rfw", 1)) if c in d and _num(d, c).notna().any()}
 
 
-def _report(d, p, label, cols, ref_train=None):
-    """ref_train: (training rows, label) to calibrate the reference systems on, as the model was."""
+def _report(d, p, label, cols, ref_train=None, w=None):
+    """ref_train: (training rows, label) to calibrate the reference systems on, as the model was.
+    w: explicit per-row design weights (overrides the training-share reweighting)."""
     y = d[label].values
     ref_auroc = {}
     for n, sc in _refs(d).items():
@@ -209,6 +210,7 @@ def _report(d, p, label, cols, ref_train=None):
             ref_auroc[n] = round(roc_auc_score(y[ok], sc[ok]), 3)
     rp = gates.fit_reference_probs(_refs(ref_train[0]), ref_train[0][ref_train[1]].values, _refs(d)) if ref_train else None
     share = float(ref_train[0][ref_train[1]].mean()) if ref_train else None  # judge under the training design
+    share = w if w is not None else share
     board = gates.scoreboard(p.values, y, _refs(d), d["_grp"].values if "_grp" in d else None, rp, share)
     fails = (gates.operational_failures(board) + gates.calibration_failures(p.values, y, w=gates.design_weights(y, share))
              + gates.region_failures(p.values, y, d["lat"].values, pd.to_numeric(d["elevation"]).values)
@@ -329,6 +331,24 @@ class _Combined:
         return np.c_[1 - p, p]
 
 
+# Real share of California wildfire starts that grow >= 1,000 acres: 1,185 of 200,113 FPA FOD
+# ignitions, development years 2001-2023 (root cause 2026-11-28: the case-control test had 48%).
+LARGE_SHARE_OF_STARTS = 1185 / 200113
+
+
+def _population_weights(rows):
+    """Combined-test design weights: fire vs control share as sampled (Model A's design), but
+    large vs small fires at the real FPA FOD ratio, so the A x B score is judged on the true mix."""
+    fire = rows["fire"].values == 1
+    large = rows["large_start"].values == 1
+    w = np.ones(len(rows))
+    nf, nl = fire.sum(), (fire & large).sum()
+    if nl and nf > nl:
+        w[fire & large] = LARGE_SHARE_OF_STARTS * nf / nl
+        w[fire & ~large] = (1 - LARGE_SHARE_OF_STARTS) * nf / (nf - nl)
+    return w
+
+
 def evaluate_combined(d, g):
     """A5c: the score the map shows, judged on 'a wildfire that grows >= LARGE_ACRES starts
     here today' (confirmed fires that grew large vs all Model A controls)."""
@@ -356,13 +376,15 @@ def evaluate_combined(d, g):
     from sklearn.linear_model import LogisticRegression
     pb_dev = mb.predict_proba(sb.transform(dev[cb].values))[:, 1]
     ok = pa_oof.notna().values
+    w_dev = _population_weights(dev)
     cal = LogisticRegression().fit(np.log(np.clip(pa_oof.values[ok] * pb_dev[ok], 1e-6, 1)).reshape(-1, 1),
-                                   dev["large_start"].values[ok])
+                                   dev["large_start"].values[ok], sample_weight=w_dev[ok])
     comb = _Combined(ma, sa, ca, mb, sb, cb, cols, cal)
     out = {"rows": {"dev": int(len(dev)), "locked test": int(len(test)), "large starts (locked)": int(test["large_start"].sum())}}
     for name, part in (("dev (in-sample for A, B trained without locked)", dev), ("LOCKED TEST", test)):
         p = pd.Series(comb.predict_proba(part[cols].values)[:, 1], index=part.index)
-        out[name] = _report(part, p, "large_start", cols, ref_train=(dev, "large_start") if part is test else None)
+        out[name] = _report(part, p, "large_start", cols, ref_train=(dev, "large_start") if part is test else None,
+                            w=_population_weights(part))
     # root-cause diagnostic (2026-11-28): which part loses ranking on the large-start target?
     from sklearn.metrics import roc_auc_score
     ya = test["large_start"].values

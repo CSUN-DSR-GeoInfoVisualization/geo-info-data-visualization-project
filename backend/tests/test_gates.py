@@ -93,3 +93,10 @@ def test_design_weights_match_the_training_share():
     w = gates.design_weights(y, 0.2)
     assert abs(np.average(y, weights=w) - 0.2) < 1e-9
     assert np.allclose(gates.design_weights(y, None), 1)
+
+
+def test_design_weights_accepts_explicit_row_weights():
+    import numpy as np
+    from ml.gates import design_weights
+    w = np.array([0.5, 2.0, 1.0])
+    assert design_weights([0, 1, 0], w) is w
