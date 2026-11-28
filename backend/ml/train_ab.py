@@ -337,15 +337,23 @@ LARGE_SHARE_OF_STARTS = 1185 / 200113
 
 
 def _population_weights(rows):
-    """Combined-test design weights: fire vs control share as sampled (Model A's design), but
-    large vs small fires at the real FPA FOD ratio, so the A x B score is judged on the true mix."""
+    """Combined-test design weights for the full real mix (2026-11-28): large vs small fires at the
+    FPA FOD ratio, and fire vs no-fire tile-days at the historical start rate pi for each row's
+    region x month (ml/models/base_rates_v0.json). References get the same weights."""
+    import os
+    rates = json.load(open(os.path.join(os.path.dirname(__file__), "models", "base_rates_v0.json")))["pi"]
     fire = rows["fire"].values == 1
     large = rows["large_start"].values == 1
+    region = gates.region_of(rows["lat"].values, pd.to_numeric(rows["elevation"]).values)
+    month = rows["acq_date"].str[5:7].astype(int).values
+    pi_bar = float(np.mean([rates[r][str(m)] for r, m in zip(region, month)]))
     w = np.ones(len(rows))
-    nf, nl = fire.sum(), (fire & large).sum()
-    if nl and nf > nl:
-        w[fire & large] = LARGE_SHARE_OF_STARTS * nf / nl
-        w[fire & ~large] = (1 - LARGE_SHARE_OF_STARTS) * nf / (nf - nl)
+    nf, nl, nc = fire.sum(), (fire & large).sum(), (~fire).sum()
+    if nl and nf > nl and nc:
+        w[fire & large] = LARGE_SHARE_OF_STARTS / nl
+        w[fire & ~large] = (1 - LARGE_SHARE_OF_STARTS) / (nf - nl)
+        w[~fire] = (1 - pi_bar) / pi_bar / nc  # total fire weight 1 : control weight (1-pi)/pi
+        w *= len(rows) / w.sum()
     return w
 
 
