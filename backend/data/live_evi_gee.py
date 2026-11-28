@@ -133,11 +133,9 @@ def get_evi_live(lat: float, lon: float) -> float:
     db.session.commit()  # release the pool connection before the slow network call
     scaled, composite_date = _evi_composite(lat, lon, today, newest_valid=True)
     try:
-        db.session.merge(FeatureCacheEvi(
-            tile_lat=tlat, tile_lon=tlon, evi=scaled,
-            source="gee_mod13q1", composite_date=composite_date,
-        ))
-        db.session.commit()
+        from models import merge_commit
+        merge_commit(FeatureCacheEvi(tile_lat=tlat, tile_lon=tlon, evi=scaled,
+                                     source="gee_mod13q1", composite_date=composite_date))
     except Exception as e:
         logger.warning("EVI cache write failed at %s,%s: %s", lat, lon, e)
         db.session.rollback()

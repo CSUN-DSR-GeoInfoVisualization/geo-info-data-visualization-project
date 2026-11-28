@@ -22,3 +22,25 @@ def test_kbdi_cached_per_quarter_degree_and_stale_fallback(app, monkeypatch):
         db.session.commit()
         with pytest.raises(RuntimeError):
             c.get_kbdi_cached(34.0, -118.0)
+
+
+def test_concurrent_insert_race_is_retried_as_update(app, monkeypatch):
+    """Two threads warming one tile: the loser's insert hits the primary key; merge_commit
+    retries and the write lands instead of logging 'KBDI cache write failed'."""
+    from sqlalchemy.exc import IntegrityError
+    from models import db, merge_commit, FeatureCacheKbdi
+    from decimal import Decimal
+    with app.app_context():
+        real, calls = db.session.merge, {"n": 0}
+
+        def racy(row):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                real(FeatureCacheKbdi(tile_lat=row.tile_lat, tile_lon=row.tile_lon, kbdi=1.0, source="x"))
+                db.session.commit()  # the other thread's row lands first
+                raise IntegrityError("INSERT", {}, Exception("duplicate key"))
+            return real(row)
+        monkeypatch.setattr(db.session, "merge", racy)
+        merge_commit(FeatureCacheKbdi(tile_lat=Decimal("32.7500"), tile_lon=Decimal("-116.2500"), kbdi=161.6, source="nasa_power"))
+        got = FeatureCacheKbdi.query.filter_by(tile_lat=Decimal("32.7500"), tile_lon=Decimal("-116.2500")).one()
+        assert float(got.kbdi) == 161.6 and calls["n"] == 2
