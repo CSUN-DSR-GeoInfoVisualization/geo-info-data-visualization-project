@@ -766,6 +766,83 @@ def label_class(args):
                                   .sort_index() * 100).round().astype(int).to_dict())
 
 
+def fpa_set(args):
+    """Model A/B rows from the USFS FPA FOD confirmed-wildfire record (A5b): each
+    sampled ignition at its discovery point and date (fire=1, label wildfire_confirmed,
+    final size and cause kept), its same-place control a year earlier, and a random
+    California-land control on the same date (burnable flag added by label-class).
+    Sample: every fire >= 100 acres, plus --n-mid of 10-100 acres and --n-small under
+    10 acres (seeded). Resumable by fpa id; --part i/n shards."""
+    import random
+    import sqlite3
+    import pandas as pd
+    from routes import ml_ingest as mi
+    from ml.geo_checks import on_ca_land
+    q = pd.read_sql("select FOD_ID, DISCOVERY_DATE, LATITUDE, LONGITUDE, FIRE_SIZE, NWCG_GENERAL_CAUSE from Fires "
+                    "where STATE='CA' and FIRE_YEAR between 2001 and 2024", sqlite3.connect(args.fpa))
+    q["date"] = pd.to_datetime(q.DISCOVERY_DATE - 2440587.5, unit="D").dt.strftime("%Y-%m-%d")
+    big = q[q.FIRE_SIZE >= 100]
+    mid = q[(q.FIRE_SIZE >= 10) & (q.FIRE_SIZE < 100)].sample(min(args.n_mid, int((q.FIRE_SIZE >= 10).sum())), random_state=7)
+    small = q[q.FIRE_SIZE < 10].sample(args.n_small, random_state=7)
+    fires = pd.concat([big, mid, small]).sort_values("FOD_ID").reset_index(drop=True)
+    i, n = map(int, args.part.split("/"))
+    fires = fires[fires.index % n == i]
+    by_date = q.groupby("date")[["LATITUDE", "LONGITUDE"]].apply(lambda g: list(zip(g.LATITUDE, g.LONGITUDE))).to_dict()
+    cols = mi.WEATHERAPP_COLS + ["pair_of", "label_class", "fpa_cause", "fpa_size_acres"]
+    done = set()
+    if os.path.exists(args.out):
+        with open(args.out, newline="") as f:
+            done = {r["pair_of"] for r in csv.DictReader(f)}
+    out, w = _open_append(args.out, cols)
+    app = _app()
+    stats = {"fires": 0, "failed": 0}
+    with app.app_context():
+        for k, r in enumerate(fires.itertuples()):
+            key = f"fpa:{r.FOD_ID}"
+            if key in done:
+                continue
+            la, lo, date = float(r.LATITUDE), float(r.LONGITUDE), r.date
+            rng = random.Random(key)
+            rows = []
+            for _ in range(500):  # random spot on the same date, away from that day's fires
+                sla, slo = rng.uniform(32.5, 42.0), rng.uniform(-124.45, -114.13)
+                if on_ca_land(sla, slo) and all(abs(sla - a) > SPATIAL_MIN_DEG or abs(slo - b) > SPATIAL_MIN_DEG
+                                                for a, b in by_date.get(date, [])):
+                    break
+            # fire first: no fire row, no group
+            for fire, pla, plo, pdate, ctype in ((1, la, lo, date, ""), (0, la, lo, mi._prior_year(date), "same_place"),
+                                                 (0, sla, slo, date, "spatial")):
+                try:
+                    raw = {}
+                    feats, n_src = mi._features_for_historical(pla, plo, pdate, raw=raw)
+                except RateLimited:
+                    raise SystemExit(f"STOPPED at {key}: a weather source is rate-limiting us. Rerun to resume.")
+                except Exception:
+                    if fire:
+                        break  # no fire row, no group
+                    continue
+                row = {"lat": round(pla, 5), "lon": round(plo, 5), "acq_date": pdate, **feats, "fire": fire,
+                       "source": "fpa_fod" if fire else ("matched_control" if ctype == "same_place" else "spatial_control"),
+                       "control_type": ctype, "n_weather_sources": n_src, "weather_method": mi.WEATHER_METHOD,
+                       "sensor": "", "pixel_m": "", "pair_of": key, **raw}
+                if fire:
+                    row.update(label_class="wildfire_confirmed", fpa_cause=r.NWCG_GENERAL_CAUSE,
+                               fpa_size_acres=r.FIRE_SIZE, fire_acres=r.FIRE_SIZE, fire_start=date, fire_id=key)
+                if not mi._row_quality_issue(row):
+                    rows.append(row)
+            if any(x["fire"] == 1 for x in rows) and len(rows) >= 2:
+                for x in rows:
+                    w.writerow(x)
+                stats["fires"] += 1
+            else:
+                stats["failed"] += 1
+            if k % 25 == 0:
+                out.flush()
+                print(f"{k}/{len(fires)} {stats}", flush=True)
+    out.close()
+    print(f"done {stats} -> {args.out}")
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -816,5 +893,11 @@ if __name__ == "__main__":
     lc.add_argument("--inp", required=True)
     lc.add_argument("--out", required=True)
     lc.add_argument("--fpa", required=True)
+    fp = sub.add_parser("fpa-set")
+    fp.add_argument("--fpa", required=True)
+    fp.add_argument("--out", required=True)
+    fp.add_argument("--part", default="0/1")
+    fp.add_argument("--n-mid", type=int, default=3000)
+    fp.add_argument("--n-small", type=int, default=3000)
     args = ap.parse_args()
-    {"label-class": label_class, "batch": batch_columns, "fire-danger": fire_danger, "growth-set": growth_set, "spatial": spatial, "label-size": label_size, "fill": fill, "regrade": regrade, "static-mask": static_mask, "raw": raw_readings, "merge": merge}[args.cmd](args)
+    {"fpa-set": fpa_set, "label-class": label_class, "batch": batch_columns, "fire-danger": fire_danger, "growth-set": growth_set, "spatial": spatial, "label-size": label_size, "fill": fill, "regrade": regrade, "static-mask": static_mask, "raw": raw_readings, "merge": merge}[args.cmd](args)
